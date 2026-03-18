@@ -4,9 +4,10 @@ drop table if exists vault_media cascade;
 -- Create the two-tier table for VAULT media
 create table vault_media (
   id bigint primary key generated always as identity,
+  file_hash text unique not null, -- SHA-256 combination of filename + size to prevent collisions
   filename text not null,
   type text not null, -- 'IMG', 'VID', 'AUDIO', 'DOC'
-  tier text not null, -- 'ARCHIVE', 'HOT', 'BOTH'
+  tier text not null, -- 'ARCHIVE', 'HOT', 'BOTH', 'EXPIRED'
   size_bytes text not null, 
   date_added text not null, 
   telegram_url text, -- Represents Archive Storage (Permanent)

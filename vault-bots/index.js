@@ -4,6 +4,7 @@ const { Client, GatewayIntentBits, Events } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 
 // 1. Initialize Supabase
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -23,6 +24,8 @@ let lastDiscordChannelId = null;
 async function saveMediaToDb({ filename, type, source, size, date, url, tags }) {
   if (!supabase) return true;
 
+  const file_hash = crypto.createHash('sha256').update(filename + size).digest('hex');
+
   // Auto-tagging logic based on tier
   const tierTag = source === 'telegram' ? 'archive' : 'hot';
   const typeTag = type.toLowerCase();
@@ -32,7 +35,7 @@ async function saveMediaToDb({ filename, type, source, size, date, url, tags }) 
     const { data: existing } = await supabase
       .from('vault_media')
       .select('*')
-      .eq('filename', filename)
+      .eq('file_hash', file_hash)
       .limit(1)
       .maybeSingle();
 
@@ -64,6 +67,7 @@ async function saveMediaToDb({ filename, type, source, size, date, url, tags }) 
       // NEW ENTRY
       const isTelegram = source === 'telegram';
       const insertPayload = {
+        file_hash,
         filename,
         type,
         tier: isTelegram ? 'ARCHIVE' : 'HOT',
@@ -112,13 +116,16 @@ if (telegrafToken) {
   tgBot = new Telegraf(telegrafToken);
 
   tgBot.start((ctx) => {
-    lastTelegramChatId = ctx.message.chat.id;
+    lastTelegramChatId = process.env.TELEGRAM_ARCHIVE_CHAT_ID || ctx.message.chat.id;
     ctx.reply('Welcome to the VAULT Bot! Send me any file, photo, video, or audio to save it to your dashboard. You can add tags in the caption.');
   });
 
   tgBot.on(['document', 'photo', 'video', 'audio', 'voice'], async (ctx) => {
+    if (process.env.TELEGRAM_OWNER_ID && ctx.from.id.toString() !== process.env.TELEGRAM_OWNER_ID) {
+      return ctx.reply("❌ Unauthorized user access.");
+    }
     try {
-      lastTelegramChatId = ctx.message.chat.id; // Record where the message came from
+      lastTelegramChatId = process.env.TELEGRAM_ARCHIVE_CHAT_ID || ctx.message.chat.id; // Record where the message came from
       let fileId, filename, mime, size;
 
       if (ctx.message.document) {
@@ -206,7 +213,11 @@ if (discordToken) {
   discordClient.on(Events.MessageCreate, async (message) => {
     if (message.author.bot) return;
 
-    lastDiscordChannelId = message.channel.id;
+    if (process.env.DISCORD_OWNER_ID && message.author.id !== process.env.DISCORD_OWNER_ID) {
+      return; 
+    }
+
+    lastDiscordChannelId = process.env.DISCORD_CACHE_CHANNEL_ID || message.channel.id;
 
     if (message.attachments.size > 0) {
       for (const [id, attachment] of message.attachments) {
@@ -253,10 +264,12 @@ app.post('/api/promote', async (req, res) => {
     const { data: file } = await supabase.from('vault_media').select('*').eq('id', id).single();
     
     if (!file || !file.discord_url) return res.status(400).json({ error: 'Valid HOT file not found.' });
-    if (!lastTelegramChatId || !tgBot) return res.status(400).json({ error: 'No Telegram active chat to upload to! Send a random message to the bot first.' });
+    
+    const activeTgChatId = process.env.TELEGRAM_ARCHIVE_CHAT_ID || lastTelegramChatId;
+    if (!activeTgChatId || !tgBot) return res.status(400).json({ error: 'No Telegram active chat to upload to! Send a random message to the bot first (or config env).' });
     
     // Telegram will download the Discord URL implicitly internally or we stream it
-    const msg = await tgBot.telegram.sendDocument(lastTelegramChatId, file.discord_url, {
+    const msg = await tgBot.telegram.sendDocument(activeTgChatId, file.discord_url, {
       caption: `[PROMOTED TO ARCHIVE] ${file.filename}`
     });
     
@@ -284,9 +297,11 @@ app.post('/api/cache', async (req, res) => {
     const { data: file } = await supabase.from('vault_media').select('*').eq('id', id).single();
     
     if (!file || !file.telegram_url) return res.status(400).json({ error: 'Valid ARCHIVE file not found.' });
-    if (!lastDiscordChannelId || !discordClient) return res.status(400).json({ error: 'No Discord active channel to upload to! Send a message to the channel first.' });
+    
+    const activeDiscordChannelId = process.env.DISCORD_CACHE_CHANNEL_ID || lastDiscordChannelId;
+    if (!activeDiscordChannelId || !discordClient) return res.status(400).json({ error: 'No Discord active channel to upload to! Send a message to the channel first (or config env).' });
 
-    const channel = await discordClient.channels.fetch(lastDiscordChannelId);
+    const channel = await discordClient.channels.fetch(activeDiscordChannelId);
     if (!channel) return res.status(400).json({ error: 'Could not fetch discord channel.' });
 
     const msg = await channel.send({
@@ -313,5 +328,27 @@ app.post('/api/cache', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+// ----------------------------------------------------
+// 5. Cron Job for Sweeping Expired Hot Links
+// ----------------------------------------------------
+setInterval(async () => {
+  if (!supabase) return;
+  try {
+    const { data: hotFiles } = await supabase.from('vault_media').select('*').eq('tier', 'HOT');
+    if (!hotFiles) return;
+
+    const ONE_DAY = 24 * 60 * 60 * 1000;
+    const now = new Date().getTime();
+
+    for (const file of hotFiles) {
+      const createdAt = new Date(file.created_at).getTime();
+      if (now - createdAt > ONE_DAY) {
+        await supabase.from('vault_media').update({ tier: 'EXPIRED' }).eq('id', file.id);
+        console.log(`[Sweeper] Marked file ID ${file.id} as EXPIRED.`);
+      }
+    }
+  } catch(e) { console.error('Cron job error:', e); }
+}, 3600000); // Checks every 1 hour
 
 app.listen(3002, () => console.log('✅ Vault API Server running on port 3002.'));

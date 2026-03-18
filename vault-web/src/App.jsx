@@ -11,6 +11,7 @@ const MOCK_MEDIA = [];
 const TierIcon = ({ tier }) => {
   if (tier === 'ARCHIVE') return <HardDrive className="w-3 h-3 text-[#0088cc]" />;
   if (tier === 'HOT') return <Zap className="w-3 h-3 text-[#5865F2]" />;
+  if (tier === 'EXPIRED') return <AlertTriangle className="w-3 h-3 text-red-500" />;
   return (
     <div className="flex -space-x-1">
       <HardDrive className="w-3 h-3 text-[#0088cc]" />
@@ -94,26 +95,52 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [isConnected, setIsConnected] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  
+  const [page, setPage] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
+  const observerTarget = React.useRef(null);
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      entries => {
+        if (entries[0].isIntersecting && hasMore && !isLoading && isConnected) {
+          setPage(prev => prev + 1);
+        }
+      },
+      { threshold: 1.0 }
+    );
+    if (observerTarget.current) observer.observe(observerTarget.current);
+    return () => observer.disconnect();
+  }, [hasMore, isLoading, isConnected]);
 
   useEffect(() => {
     async function fetchMedia() {
       if (!supabase) {
-        setMediaItems(MOCK_MEDIA);
+        if (page === 0) setMediaItems(MOCK_MEDIA);
         setIsLoading(false);
+        setHasMore(false);
         return;
       }
       setIsConnected(true);
-      const { data, error } = await supabase.from('vault_media').select('*').order('created_at', { ascending: false });
+      if (page === 0) setIsLoading(true);
+
+      const from = page * 50;
+      const to = from + 49;
+
+      const { data, error } = await supabase.from('vault_media').select('*').order('created_at', { ascending: false }).range(from, to);
       
       if (error) {
         console.error('Supabase error:', error);
       } else {
-        setMediaItems(data || []);
+        if (page === 0) setMediaItems(data || []);
+        else setMediaItems(prev => [...prev, ...(data || [])]);
+
+        if (!data || data.length < 50) setHasMore(false);
       }
       setIsLoading(false);
     }
     fetchMedia();
-  }, []);
+  }, [page]);
 
   const filteredMedia = useMemo(() => {
     return mediaItems.filter(item => {
@@ -194,7 +221,8 @@ export default function App() {
                 { id: 'ALL', label: 'Everything', icon: <Hash className="w-4 h-4"/> },
                 { id: 'ARCHIVE', label: 'Archive (Telegram)', icon: <HardDrive className="w-4 h-4 text-[#0088cc]"/> },
                 { id: 'HOT', label: 'Hot Cache (Discord)', icon: <Zap className="w-4 h-4 text-[#5865F2]"/> },
-                { id: 'BOTH', label: 'Fully Synced', icon: <RefreshCw className="w-4 h-4 text-emerald-400"/> }
+                { id: 'BOTH', label: 'Fully Synced', icon: <RefreshCw className="w-4 h-4 text-emerald-400"/> },
+                { id: 'EXPIRED', label: 'Expired Links', icon: <AlertTriangle className="w-4 h-4 text-red-500"/> }
               ].map(tier => (
                 <button 
                   key={tier.id}
@@ -257,15 +285,22 @@ export default function App() {
 
         {/* Media Grid */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 flex-1 content-start">
-          {isLoading ? (
+          {isLoading && page === 0 ? (
              <div className="col-span-full h-64 flex flex-col items-center justify-center text-vault-text-muted">
                <div className="w-8 h-8 border-2 border-vault-accent border-t-transparent rounded-full animate-spin mb-4"></div>
                <p>Searching the two-tier vault...</p>
              </div>
           ) : filteredMedia.length > 0 ? (
-            filteredMedia.map(item => (
-              <MediaCard key={item.id} item={item} onClick={setSelectedMedia} />
-            ))
+            <>
+              {filteredMedia.map(item => (
+                <MediaCard key={item.id} item={item} onClick={setSelectedMedia} />
+              ))}
+              {hasMore && (
+                <div ref={observerTarget} className="col-span-full py-8 flex justify-center text-vault-text-muted">
+                  <RefreshCw className="w-6 h-6 animate-spin opacity-50" />
+                </div>
+              )}
+            </>
           ) : (
             <div className="col-span-full h-64 flex flex-col items-center justify-center text-vault-text-muted border border-dashed border-vault-border rounded-2xl">
               <Search className="w-12 h-12 mb-4 opacity-20" />
@@ -340,9 +375,16 @@ export default function App() {
               </div>
             )}
 
-            <div className="flex-1 overflow-auto p-0 bg-black/50 min-h-[300px] flex items-center justify-center relative">
+            <div className="flex-1 overflow-auto p-0 bg-black/50 min-h-[300px] flex items-center justify-center relative w-full">
               {selectedMedia.type === 'IMG' && (selectedMedia.discord_url || selectedMedia.telegram_url) ? (
                  <ImageFallback item={selectedMedia} className="max-w-full max-h-[50vh] object-contain" />
+              ) : selectedMedia.type === 'VID' && (selectedMedia.discord_url || selectedMedia.telegram_url) ? (
+                 <video controls autoPlay src={selectedMedia.discord_url || selectedMedia.telegram_url} className="max-w-full max-h-[60vh] object-contain w-full outline-none bg-black/20" />
+              ) : selectedMedia.type === 'AUDIO' && (selectedMedia.discord_url || selectedMedia.telegram_url) ? (
+                 <div className="flex flex-col items-center justify-center w-full p-8">
+                   <Music className="w-32 h-32 mb-8 text-vault-accent opacity-80 drop-shadow-2xl" />
+                   <audio controls autoPlay src={selectedMedia.discord_url || selectedMedia.telegram_url} className="w-full max-w-md" />
+                 </div>
               ) : (
                 <div className="flex flex-col items-center justify-center text-vault-text-muted opacity-50">
                   <TypeIcon type={selectedMedia.type} className="w-24 h-24 mb-4" />
