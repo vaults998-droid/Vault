@@ -1,34 +1,40 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Search, Image, Video, FileText, Music, Hash, Download, Link as LinkIcon, X, Filter } from 'lucide-react';
+import { Search, Image, Video, FileText, Music, Hash, Download, Link as LinkIcon, X, Filter, HardDrive, Zap, RefreshCw, CloudRain, AlertTriangle } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 
-// Initialize Supabase. Replace these placeholders with `.env.local`
-// environment variables in Vercel/Netlify for production.
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const supabase = (supabaseUrl && supabaseKey) ? createClient(supabaseUrl, supabaseKey) : null;
 
-const MOCK_MEDIA = [
-  { id: 1, filename: 'project_blueprint.pdf', type: 'DOC', source: 'telegram', size: '2.4 MB', date: '2026-03-17', tags: ['work', 'planning'], url: '#' },
-  { id: 2, filename: 'vacation_photo.jpg', type: 'IMG', source: 'discord', size: '4.1 MB', date: '2026-03-16', tags: ['personal', 'travel'], url: 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=800' },
-  { id: 3, filename: 'demo_recording.mp4', type: 'VID', source: 'discord', size: '150 MB', date: '2026-03-15', tags: ['work', 'demo'], url: '#' },
-  { id: 4, filename: 'voice_memo.mp3', type: 'AUDIO', source: 'telegram', size: '1.2 MB', date: '2026-03-14', tags: ['ideas'], url: '#' },
-  { id: 5, filename: 'meeting_notes.docx', type: 'DOC', source: 'telegram', size: '45 KB', date: '2026-03-12', tags: ['work'], url: '#' },
-  { id: 6, filename: 'design_mockup.png', type: 'IMG', source: 'discord', size: '8.5 MB', date: '2026-03-10', tags: ['design'], url: 'https://images.unsplash.com/photo-1561070791-2526d30994b5?w=800' },
-];
+const MOCK_MEDIA = [];
 
-const FilterChip = ({ label, active, onClick }) => (
-  <button
-    onClick={onClick}
-    className={`px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
-      active 
-        ? 'bg-vault-accent text-white shadow-[0_0_15px_rgba(139,92,246,0.5)]' 
-        : 'bg-vault-surface text-vault-text-muted hover:bg-vault-surface-hover hover:text-white border border-vault-border'
-    }`}
-  >
-    {label}
-  </button>
-);
+const TierIcon = ({ tier }) => {
+  if (tier === 'ARCHIVE') return <HardDrive className="w-3 h-3 text-[#0088cc]" />;
+  if (tier === 'HOT') return <Zap className="w-3 h-3 text-[#5865F2]" />;
+  return (
+    <div className="flex -space-x-1">
+      <HardDrive className="w-3 h-3 text-[#0088cc]" />
+      <Zap className="w-3 h-3 text-[#5865F2]" />
+    </div>
+  );
+};
+
+const ImageFallback = ({ item, className }) => {
+  const [src, setSrc] = useState(item.discord_url || item.telegram_url);
+  const [error, setError] = useState(false);
+
+  const handleError = () => {
+    if (src === item.discord_url && item.telegram_url) {
+      setSrc(item.telegram_url);
+    } else {
+      setError(true);
+    }
+  };
+
+  if (error || !src) return <div className="absolute inset-0 bg-red-500/10 flex flex-col items-center justify-center text-red-400 text-xs"><AlertTriangle className="w-6 h-6 mb-1 opacity-50"/>Link Expired</div>;
+
+  return <img src={src} alt={item.filename} onError={handleError} className={className} />;
+};
 
 const TypeIcon = ({ type, className = "" }) => {
   switch (type) {
@@ -47,16 +53,16 @@ const MediaCard = ({ item, onClick }) => {
       className="group relative flex flex-col bg-vault-surface rounded-xl border border-vault-border overflow-hidden cursor-pointer hover:border-vault-accent/50 hover:shadow-[0_8px_30px_rgb(0,0,0,0.5)] hover:-translate-y-1 transition-all duration-300"
     >
       <div className="h-48 w-full bg-[#1e1e24] flex items-center justify-center relative overflow-hidden text-vault-text-muted">
-        {item.type === 'IMG' && item.url && item.url !== '#' ? (
-          <img src={item.url} alt={item.filename} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
+        {item.type === 'IMG' && (item.discord_url || item.telegram_url) ? (
+          <ImageFallback item={item} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
         ) : (
           <TypeIcon type={item.type} className="w-16 h-16 opacity-50 group-hover:scale-110 transition-transform duration-300 group-hover:text-vault-accent" />
         )}
         
-        {/* Source Badge */}
-        <div className="absolute top-3 right-3 px-2 py-1 rounded bg-black/60 backdrop-blur-md text-xs font-bold border border-white/10 uppercase tracking-wider flex items-center gap-1">
-          <span className={`w-2 h-2 rounded-full ${item.source === 'telegram' ? 'bg-[#0088cc]' : 'bg-[#5865F2]'}`}></span>
-          {item.source}
+        {/* Tier Badge */}
+        <div className="absolute top-3 right-3 px-2 py-1 rounded bg-black/80 backdrop-blur-md text-xs font-bold border border-white/10 tracking-wider flex items-center gap-1.5 shadow-lg">
+          <TierIcon tier={item.tier} />
+          <span className="text-[10px] uppercase text-vault-text-muted">{item.tier}</span>
         </div>
       </div>
       
@@ -67,11 +73,12 @@ const MediaCard = ({ item, onClick }) => {
           <span>{item.size_bytes || item.size}</span>
         </div>
         <div className="mt-auto pt-3 flex flex-wrap gap-1.5">
-          {item.tags?.map(tag => (
+          {item.tags?.slice(0, 3).map(tag => (
             <span key={tag} className="text-[10px] px-2 py-0.5 rounded-md bg-vault-border text-vault-text-muted uppercase tracking-wider font-semibold">
               <Hash className="w-2 h-2 inline mr-0.5 opacity-70" />{tag}
             </span>
           ))}
+          {item.tags?.length > 3 && <span className="text-[10px] px-2 py-0.5 text-vault-text-muted">+{item.tags.length - 3}</span>}
         </div>
       </div>
     </div>
@@ -81,17 +88,29 @@ const MediaCard = ({ item, onClick }) => {
 export default function App() {
   const [search, setSearch] = useState('');
   const [activeType, setActiveType] = useState('ALL');
-  const [activeSource, setActiveSource] = useState('ALL');
+  const [activeTier, setActiveTier] = useState('ALL');
   const [selectedMedia, setSelectedMedia] = useState(null);
-  const [mediaItems, setMediaItems] = useState(MOCK_MEDIA);
+  const [mediaItems, setMediaItems] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isConnected, setIsConnected] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
 
   useEffect(() => {
     async function fetchMedia() {
-      if (!supabase) return;
-      const { data, error } = await supabase.from('vault_media').select('*').order('created_at', { ascending: false });
-      if (!error && data && data.length > 0) {
-        setMediaItems(data);
+      if (!supabase) {
+        setMediaItems(MOCK_MEDIA);
+        setIsLoading(false);
+        return;
       }
+      setIsConnected(true);
+      const { data, error } = await supabase.from('vault_media').select('*').order('created_at', { ascending: false });
+      
+      if (error) {
+        console.error('Supabase error:', error);
+      } else {
+        setMediaItems(data || []);
+      }
+      setIsLoading(false);
     }
     fetchMedia();
   }, []);
@@ -101,11 +120,53 @@ export default function App() {
       const matchesSearch = item.filename.toLowerCase().includes(search.toLowerCase()) || 
                             (item.tags || []).some(tag => tag.toLowerCase().includes(search.toLowerCase()));
       const matchesType = activeType === 'ALL' || item.type === activeType;
-      const matchesSource = activeSource === 'ALL' || item.source.toLowerCase() === activeSource.toLowerCase();
+      const matchesTier = activeTier === 'ALL' || item.tier === activeTier;
       
-      return matchesSearch && matchesType && matchesSource;
+      return matchesSearch && matchesType && matchesTier;
     });
-  }, [search, activeType, activeSource, mediaItems]);
+  }, [search, activeType, activeTier, mediaItems]);
+
+  const handlePromote = async (id) => {
+    setIsProcessing(true);
+    try {
+      const res = await fetch('http://localhost:3002/api/promote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id })
+      });
+      const result = await res.json();
+      if (result.success) {
+        setMediaItems(prev => prev.map(m => m.id === id ? { ...m, tier: result.tier, telegram_url: result.url, tags: result.tags } : m));
+        setSelectedMedia(prev => ({ ...prev, tier: result.tier, telegram_url: result.url, tags: result.tags }));
+      } else {
+        alert("Promote failed: " + result.error);
+      }
+    } catch (e) {
+      alert("Error: " + e.message);
+    }
+    setIsProcessing(false);
+  };
+
+  const handleCache = async (id) => {
+    setIsProcessing(true);
+    try {
+      const res = await fetch('http://localhost:3002/api/cache', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id })
+      });
+      const result = await res.json();
+      if (result.success) {
+        setMediaItems(prev => prev.map(m => m.id === id ? { ...m, tier: result.tier, discord_url: result.url, tags: result.tags } : m));
+        setSelectedMedia(prev => ({ ...prev, tier: result.tier, discord_url: result.url, tags: result.tags }));
+      } else {
+        alert("Cache failed: " + result.error);
+      }
+    } catch (e) {
+      alert("Error: " + e.message);
+    }
+    setIsProcessing(false);
+  };
 
   return (
     <div className="min-h-screen bg-vault-bg text-vault-text flex selection:bg-vault-accent/30 font-sans">
@@ -119,20 +180,29 @@ export default function App() {
           <h1 className="text-2xl font-black tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">VAULT</h1>
         </div>
 
+        {/* Connection Status Badge */}
+        <div className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 border ${isConnected ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-amber-500/10 border-amber-500/20 text-amber-400'}`}>
+          <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${isConnected ? 'bg-emerald-400' : 'bg-amber-400'}`}></span>
+          {isConnected ? 'Dual-Tier Sync: Active' : 'Local: Mock Mode'}
+        </div>
+
         <div className="flex flex-col gap-6">
           <div>
-            <h2 className="text-xs font-bold text-vault-text-muted uppercase tracking-widest mb-3">Sources</h2>
+            <h2 className="text-xs font-bold text-vault-text-muted uppercase tracking-widest mb-3">Storage Tier</h2>
             <div className="flex flex-col gap-1">
-              {['ALL', 'Telegram', 'Discord'].map(src => (
+              {[
+                { id: 'ALL', label: 'Everything', icon: <Hash className="w-4 h-4"/> },
+                { id: 'ARCHIVE', label: 'Archive (Telegram)', icon: <HardDrive className="w-4 h-4 text-[#0088cc]"/> },
+                { id: 'HOT', label: 'Hot Cache (Discord)', icon: <Zap className="w-4 h-4 text-[#5865F2]"/> },
+                { id: 'BOTH', label: 'Fully Synced', icon: <RefreshCw className="w-4 h-4 text-emerald-400"/> }
+              ].map(tier => (
                 <button 
-                  key={src}
-                  onClick={() => setActiveSource(src)}
-                  className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeSource === src ? 'bg-vault-surface text-white' : 'text-vault-text-muted hover:text-white hover:bg-vault-surface/50'}`}
+                  key={tier.id}
+                  onClick={() => setActiveTier(tier.id)}
+                  className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeTier === tier.id ? 'bg-vault-surface text-white' : 'text-vault-text-muted hover:text-white hover:bg-vault-surface/50'}`}
                 >
-                  {src === 'Telegram' && <span className="w-2 h-2 rounded-full bg-[#0088cc]"></span>}
-                  {src === 'Discord' && <span className="w-2 h-2 rounded-full bg-[#5865F2]"></span>}
-                  {src === 'ALL' && <span className="w-2 h-2 rounded-full border border-current"></span>}
-                  {src}
+                  {tier.icon}
+                  {tier.label}
                 </button>
               ))}
             </div>
@@ -170,14 +240,14 @@ export default function App() {
         <header className="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center mb-8">
           <div>
             <h2 className="text-3xl font-bold tracking-tight">Your Media</h2>
-            <p className="text-vault-text-muted text-sm mt-1">Manage files from all your connected platforms</p>
+            <p className="text-vault-text-muted text-sm mt-1">Manage unified files across Archive & Hot Cache</p>
           </div>
           
           <div className="relative w-full md:w-80 group">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-vault-text-muted group-focus-within:text-vault-accent transition-colors" />
             <input 
               type="text" 
-              placeholder="Search by name or tag..." 
+              placeholder="Search by name or config tag..." 
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="w-full bg-vault-surface border border-vault-border rounded-xl pl-10 pr-4 py-2.5 text-sm outline-none focus:border-vault-accent/50 focus:ring-1 focus:ring-vault-accent/50 transition-all shadow-inner text-white placeholder:text-vault-text-muted"
@@ -185,23 +255,21 @@ export default function App() {
           </div>
         </header>
 
-        {/* Filter Chips - Mobile Mainly / Extra Filters */}
-        <div className="flex flex-wrap items-center gap-2 mb-8 md:hidden">
-          {['ALL', 'IMG', 'VID', 'AUDIO', 'DOC'].map(type => (
-            <FilterChip key={type} label={type} active={activeType === type} onClick={() => setActiveType(type)} />
-          ))}
-        </div>
-
         {/* Media Grid */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 flex-1 content-start">
-          {filteredMedia.length > 0 ? (
+          {isLoading ? (
+             <div className="col-span-full h-64 flex flex-col items-center justify-center text-vault-text-muted">
+               <div className="w-8 h-8 border-2 border-vault-accent border-t-transparent rounded-full animate-spin mb-4"></div>
+               <p>Searching the two-tier vault...</p>
+             </div>
+          ) : filteredMedia.length > 0 ? (
             filteredMedia.map(item => (
               <MediaCard key={item.id} item={item} onClick={setSelectedMedia} />
             ))
           ) : (
             <div className="col-span-full h-64 flex flex-col items-center justify-center text-vault-text-muted border border-dashed border-vault-border rounded-2xl">
               <Search className="w-12 h-12 mb-4 opacity-20" />
-              <p>No files found matching your criteria.</p>
+              <p>{search ? 'No files found matching your search.' : 'Your vault is currently empty.'}</p>
             </div>
           )}
         </div>
@@ -215,19 +283,20 @@ export default function App() {
             
             <div className="flex items-center justify-between p-4 border-b border-[#27272a]">
               <div className="flex items-center gap-3">
-                <div className="p-2 bg-[#27272a] rounded-lg text-vault-text-muted">
+                <div className="p-2 bg-[#27272a] rounded-lg text-vault-text-muted relative">
                   <TypeIcon type={selectedMedia.type} />
+                  <div className="absolute -bottom-1 -right-1 bg-[#18181b] rounded-full p-0.5 border border-[#27272a]">
+                    <TierIcon tier={selectedMedia.tier} />
+                  </div>
                 </div>
                 <div>
                   <h3 className="font-bold text-lg leading-none">{selectedMedia.filename}</h3>
-                  <div className="text-sm text-vault-text-muted mt-1 uppercase text-[10px] tracking-widest font-bold flex gap-2">
-                    <span className={selectedMedia.source === 'telegram' ? 'text-[#0088cc]' : 'text-[#5865F2]'}>
-                      {selectedMedia.source}
-                    </span>
+                  <div className="text-sm text-vault-text-muted mt-1 uppercase text-[10px] tracking-widest font-bold flex items-center gap-2">
+                    <span className="text-vault-accent">{selectedMedia.tier} TIER</span>
                     <span>•</span>
-                    <span>{selectedMedia.size}</span>
+                    <span>{selectedMedia.size_bytes}</span>
                     <span>•</span>
-                    <span>{selectedMedia.date}</span>
+                    <span>{selectedMedia.date_added}</span>
                   </div>
                 </div>
               </div>
@@ -239,19 +308,51 @@ export default function App() {
               </button>
             </div>
 
+            {selectedMedia.tier === 'HOT' && (
+              <div className="bg-amber-500/10 border-y border-amber-500/20 px-4 py-2 flex items-center justify-between">
+                <p className="text-xs text-amber-400 flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4" /> This file is in Hot Cache only. Discord links may expire!
+                </p>
+                <button 
+                  onClick={() => handlePromote(selectedMedia.id)}
+                  disabled={isProcessing}
+                  className="text-xs bg-amber-500 text-[#18181b] font-bold px-3 py-1 rounded-md hover:bg-amber-400 disabled:opacity-50 flex items-center gap-1"
+                >
+                  {isProcessing ? <RefreshCw className="w-3 h-3 animate-spin"/> : <HardDrive className="w-3 h-3"/>}
+                  Promote to Archive
+                </button>
+              </div>
+            )}
+
+            {selectedMedia.tier === 'ARCHIVE' && (
+              <div className="bg-[#0088cc]/10 border-y border-[#0088cc]/20 px-4 py-2 flex items-center justify-between">
+                <p className="text-xs text-[#0088cc] flex items-center gap-2">
+                  <CloudRain className="w-4 h-4" /> This file is cold. Caching to Discord unlocks faster delivery!
+                </p>
+                <button 
+                  onClick={() => handleCache(selectedMedia.id)}
+                  disabled={isProcessing}
+                  className="text-xs bg-[#0088cc] text-white font-bold px-3 py-1 rounded-md hover:brightness-110 disabled:opacity-50 flex items-center gap-1"
+                >
+                  {isProcessing ? <RefreshCw className="w-3 h-3 animate-spin"/> : <Zap className="w-3 h-3"/>}
+                  Cache to Hot
+                </button>
+              </div>
+            )}
+
             <div className="flex-1 overflow-auto p-0 bg-black/50 min-h-[300px] flex items-center justify-center relative">
-              {selectedMedia.type === 'IMG' && selectedMedia.url !== '#' ? (
-                <img src={selectedMedia.url} alt={selectedMedia.filename} className="max-w-full max-h-[50vh] object-contain" />
+              {selectedMedia.type === 'IMG' && (selectedMedia.discord_url || selectedMedia.telegram_url) ? (
+                 <ImageFallback item={selectedMedia} className="max-w-full max-h-[50vh] object-contain" />
               ) : (
                 <div className="flex flex-col items-center justify-center text-vault-text-muted opacity-50">
                   <TypeIcon type={selectedMedia.type} className="w-24 h-24 mb-4" />
-                  <p>Preview not available</p>
+                  <p>Preview not available for this type</p>
                 </div>
               )}
             </div>
 
-            <div className="p-4 border-t border-[#27272a] bg-[#101014] flex items-center justify-between">
-              <div className="flex gap-2">
+            <div className="p-4 border-t border-[#27272a] bg-[#101014] flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+              <div className="flex flex-wrap gap-2">
                 {selectedMedia.tags?.map(tag => (
                   <span key={tag} className="text-xs px-2.5 py-1 rounded bg-[#27272a] text-vault-text-muted flex items-center gap-1 hover:text-white cursor-pointer transition-colors border border-transparent hover:border-vault-accent/30">
                     <Hash className="w-3 h-3" />{tag}
@@ -259,13 +360,20 @@ export default function App() {
                 ))}
               </div>
               
-              <div className="flex items-center gap-3">
-                <button className="flex items-center gap-2 px-4 py-2 hover:bg-[#27272a] rounded-lg text-sm font-medium transition-colors border border-transparent">
+              <div className="flex items-center gap-2 shrink-0">
+                <button 
+                  onClick={() => navigator.clipboard.writeText(selectedMedia.discord_url || selectedMedia.telegram_url)}
+                  className="flex items-center gap-2 px-4 py-2 hover:bg-[#27272a] rounded-lg text-sm font-medium transition-colors border border-transparent"
+                >
                   <LinkIcon className="w-4 h-4" /> Copy Link
                 </button>
-                <button className="flex items-center gap-2 px-4 py-2 bg-vault-accent hover:bg-vault-accent-hover text-white rounded-lg text-sm font-medium transition-colors shadow-lg shadow-vault-accent/20">
-                  <Download className="w-4 h-4" /> Download
-                </button>
+                <a 
+                  href={selectedMedia.discord_url || selectedMedia.telegram_url}
+                  target="_blank" rel="noreferrer"
+                  className="flex items-center gap-2 px-4 py-2 bg-vault-accent hover:bg-vault-accent-hover text-white rounded-lg text-sm font-medium transition-colors shadow-lg shadow-vault-accent/20"
+                >
+                  <Download className="w-4 h-4" /> Download URL
+                </a>
               </div>
             </div>
 
