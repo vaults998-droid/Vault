@@ -1,0 +1,21 @@
+@import "tailwindcss";
+
+@theme {
+  --color-vault-bg: #09090b;
+  --color-vault-surface: #18181b;
+  --color-vault-surface-hover: #27272a;
+  --color-vault-border: #27272a;
+  --color-vault-text: #fafafa;
+  --color-vault-text-muted: #a1a1aa;
+  --color-vault-accent: #8b5cf6;
+  --color-vault-accent-hover: #7c3aed;
+  --color-discord: #5865F2;
+  --color-telegram: #0088cc;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-vault-bg);
+    color: var(--color-vault-text);
+  }
+}
