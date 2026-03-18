@@ -90,7 +90,7 @@ if (telegrafToken) {
 
       // Get Telegram file path to construct URL (note: TG URLs have limited lifespan or need bot download)
       const fileUrl = await ctx.telegram.getFileLink(fileId);
-      
+
       // Parse tags from caption
       const caption = ctx.message.caption || '';
       const tags = caption.match(/#[\w-]+/g)?.map(t => t.replace('#', '')) || ['telegram'];
@@ -122,7 +122,7 @@ if (telegrafToken) {
 
   tgBot.launch();
   console.log('✅ Telegram Bot Started');
-  
+
   // Enable graceful stop
   process.once('SIGINT', () => tgBot.stop('SIGINT'));
   process.once('SIGTERM', () => tgBot.stop('SIGTERM'));
@@ -133,6 +133,8 @@ if (telegrafToken) {
 // ----------------------------------------------------
 // 3. Discord Bot
 // ----------------------------------------------------
+
+
 const discordToken = process.env.DISCORD_BOT_TOKEN;
 if (discordToken) {
   const discordClient = new Client({
@@ -153,7 +155,7 @@ if (discordToken) {
 
     if (message.attachments.size > 0) {
       for (const [id, attachment] of message.attachments) {
-        
+
         // Parse tags from the message content
         const content = message.content || '';
         const tags = content.match(/#[\w-]+/g)?.map(t => t.replace('#', '')) || ['discord'];
@@ -185,3 +187,4 @@ if (discordToken) {
 } else {
   console.log('⚠️  Discord token missing. Skipping Discord bot.');
 }
+
