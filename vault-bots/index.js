@@ -119,10 +119,9 @@ if (telegrafToken) {
     ctx.reply('Welcome to the VAULT Bot! Send me any file, photo, video, or audio to save it to your dashboard. You can add tags in the caption.');
   });
 
-  tgBot.on(['document', 'photo', 'video', 'audio', 'voice'], async (ctx) => {
-    if (process.env.TELEGRAM_OWNER_ID && ctx.from.id.toString() !== process.env.TELEGRAM_OWNER_ID) {
-      return ctx.reply("❌ Unauthorized user access.");
-    }
+  tgBot.on(['document', 'photo', 'video', 'audio', 'voice', 'sticker'], async (ctx) => {
+    if (process.env.TELEGRAM_OWNER_ID && ctx.from.id.toString() !== process.env.TELEGRAM_OWNER_ID) return;
+
     try {
       lastTelegramChatId = process.env.TELEGRAM_ARCHIVE_CHAT_ID || ctx.message.chat.id; // Record where the message came from
       let fileId, file_unique_id, filename, mime, size;
@@ -158,6 +157,13 @@ if (telegrafToken) {
         filename    = `voice_${Date.now()}.ogg`;
         mime        = ctx.message.voice.mime_type;
         size        = ctx.message.voice.file_size ?? 0;
+      } else if (ctx.message.sticker) {
+        // FIX: handle webp/webm stickers
+        fileId      = ctx.message.sticker.file_id;
+        file_unique_id = ctx.message.sticker.file_unique_id;
+        filename    = `sticker_${Date.now()}.webp`;
+        mime        = 'image/webp';
+        size        = ctx.message.sticker.file_size ?? 0;
       }
 
       const fileUrl = await ctx.telegram.getFileLink(fileId);
@@ -282,7 +288,8 @@ app.post('/api/promote', async (req, res) => {
       caption: `[PROMOTED TO ARCHIVE] ${file.filename}`
     });
 
-    const fileId = msg.document?.file_id || msg.video?.file_id || msg.audio?.file_id || msg.photo?.[msg.photo.length-1]?.file_id;
+    const fileId = msg.document?.file_id || msg.video?.file_id || msg.audio?.file_id || msg.photo?.[msg.photo.length-1]?.file_id || msg.sticker?.file_id;
+    const file_unique_id = msg.document?.file_unique_id || msg.video?.file_unique_id || msg.audio?.file_unique_id || msg.photo?.[msg.photo.length-1]?.file_unique_id || msg.sticker?.file_unique_id;
     if (!fileId) return res.status(500).json({ error: 'Telegram upload succeeded but could not extract file_id.' });
 
     const fileUrl = await tgBot.telegram.getFileLink(fileId);
@@ -296,6 +303,7 @@ app.post('/api/promote', async (req, res) => {
       tags:             updatedTags
     }).eq('id', file.id);
 
+    // FIX #1: Sync back the dedup ID if possible (although this might just be an update, keeping it safe)
     res.json({ success: true, url: fileUrl.href, tier: 'BOTH', tags: updatedTags });
   } catch(e) {
     console.error('Promote failed:', e);
@@ -371,7 +379,14 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     const fileId = msg.document?.file_id
                 || msg.video?.file_id
                 || msg.audio?.file_id
-                || msg.photo?.[msg.photo.length - 1]?.file_id;
+                || msg.photo?.[msg.photo.length - 1]?.file_id
+                || msg.sticker?.file_id;
+
+    const file_unique_id = msg.document?.file_unique_id
+                || msg.video?.file_unique_id
+                || msg.audio?.file_unique_id
+                || msg.photo?.[msg.photo.length - 1]?.file_unique_id
+                || msg.sticker?.file_unique_id;
 
     if (!fileId) return res.status(500).json({ error: 'Telegram upload succeeded but could not get file ID.' });
 
@@ -385,6 +400,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
       date: dateStr,
       url: fileUrl.href,
       telegram_file_id: fileId,  // FIX #1: Store permanent file_id for web-uploaded files
+      file_unique_id,
       tags: ['web-upload', ...tags]
     });
 
@@ -442,7 +458,7 @@ setInterval(async () => {
           });
 
           // FIX #2: Guard undefined fileId before calling getFileLink — failure increments counter
-          const fileId = msg.document?.file_id || msg.video?.file_id || msg.audio?.file_id || msg.photo?.[msg.photo.length-1]?.file_id;
+          const fileId = msg.document?.file_id || msg.video?.file_id || msg.audio?.file_id || msg.photo?.[msg.photo.length-1]?.file_id || msg.sticker?.file_id;
           if (!fileId) {
             await supabase.from('vault_media').update({ promote_attempts: attempts + 1 }).eq('id', file.id);
             console.error(`[Sweeper] ❌ Auto-promote for #${file.id} returned no file_id. Incrementing attempt counter.`);
@@ -466,6 +482,21 @@ setInterval(async () => {
         }
       }
     }
+
+    // ── Sweeper Phase 2: Purge TRASH older than 30 days
+    const { data: trashFiles } = await supabase.from('vault_media').select('id, link_verified_at, filename').eq('tier', 'TRASH');
+    if (trashFiles && trashFiles.length > 0) {
+      const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
+      for (const file of trashFiles) {
+        if (!file.link_verified_at) continue; // safety fallback
+        const age = now - new Date(file.link_verified_at).getTime();
+        if (age >= THIRTY_DAYS) {
+          await supabase.from('vault_media').delete().eq('id', file.id);
+          console.log(`[Sweeper] 💀 Hard-deleted #${file.id} "${file.filename}" (in TRASH > 30 days).`);
+        }
+      }
+    }
+
   } catch(e) { console.error('Cron job error:', e); }
 }, 3600000); // Runs every hour
 
@@ -487,6 +518,80 @@ app.post('/api/update-meta', async (req, res) => {
     res.json({ success: true, data });
   } catch(e) {
     console.error('Meta update failed:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ----------------------------------------------------
+// 7.5. Delete API (Soft Delete → TRASH)
+// ----------------------------------------------------
+app.delete('/api/delete/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    if (!id) return res.status(400).json({ error: 'id is required' });
+
+    // Soft delete: set tier to TRASH and save timestamp in link_verified_at
+    const { error } = await supabase.from('vault_media').update({
+      tier: 'TRASH',
+      link_verified_at: new Date().toISOString()
+    }).eq('id', id);
+
+    if (error) return res.status(500).json({ error: `DB error: ${error.message}` });
+    
+    res.json({ success: true });
+    console.log(`[Delete] 🗑️ Moved item #${id} to TRASH`);
+  } catch(e) {
+    console.error('Delete failed:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ----------------------------------------------------
+// 7.6. Restore API (TRASH → Original Tier)
+// ----------------------------------------------------
+app.post('/api/restore/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    if (!id) return res.status(400).json({ error: 'id is required' });
+
+    const { data: file, error: fetchErr } = await supabase.from('vault_media').select('*').eq('id', id).single();
+    if (fetchErr || !file) return res.status(404).json({ error: 'File not found' });
+    if (file.tier !== 'TRASH') return res.status(400).json({ error: 'File is not in TRASH' });
+
+    let restoredTier = 'HOT';
+    if (file.telegram_url && file.discord_url) restoredTier = 'BOTH';
+    else if (file.telegram_url || file.telegram_file_id) restoredTier = 'ARCHIVE';
+
+    const { error } = await supabase.from('vault_media').update({
+      tier: restoredTier,
+      link_verified_at: null // clear the deletion timer
+    }).eq('id', id);
+
+    if (error) return res.status(500).json({ error: `DB error: ${error.message}` });
+    
+    res.json({ success: true, tier: restoredTier });
+    console.log(`[Restore] ♻️ Restored item #${id} to ${restoredTier}`);
+  } catch(e) {
+    console.error('Restore failed:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ----------------------------------------------------
+// 7.7. Hard Delete API (Drop Row)
+// ----------------------------------------------------
+app.delete('/api/hard-delete/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    if (!id) return res.status(400).json({ error: 'id is required' });
+
+    const { error } = await supabase.from('vault_media').delete().eq('id', id);
+    if (error) return res.status(500).json({ error: `DB error: ${error.message}` });
+    
+    res.json({ success: true });
+    console.log(`[Delete] 💀 Hard-deleted item #${id} from database forever`);
+  } catch(e) {
+    console.error('Hard Delete failed:', e);
     res.status(500).json({ error: e.message });
   }
 });

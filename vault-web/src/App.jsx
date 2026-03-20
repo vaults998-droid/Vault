@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import {
   Search, Image, Video, FileText, Music, Hash, Download, Link as LinkIcon,
-  X, Filter, HardDrive, Zap, RefreshCw, CloudRain, AlertTriangle,
+  X, Filter, HardDrive, Zap, RefreshCw, CloudRain, AlertTriangle, Trash2,
   UploadCloud, Plus, CheckCircle, Edit3, Save, BarChart2, ShieldCheck, RotateCcw
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
@@ -47,11 +47,17 @@ const TypeIcon = ({ type, className = '' }) => {
 };
 
 // ── Media Card ────────────────────────────────────────────────────────────────
-const MediaCard = ({ item, onClick }) => (
+const MediaCard = ({ item, onClick, isSelected, isSelectMode, onToggle }) => (
   <div
-    onClick={() => onClick(item)}
-    className="group relative flex flex-col bg-vault-surface rounded-xl border border-vault-border overflow-hidden cursor-pointer hover:border-vault-accent/50 hover:shadow-[0_8px_30px_rgb(0,0,0,0.5)] hover:-translate-y-1 transition-all duration-300"
+    onClick={() => isSelectMode ? onToggle(item.id) : onClick(item)}
+    className={`group relative flex flex-col bg-vault-surface rounded-xl overflow-hidden cursor-pointer transition-all duration-300 ${isSelected ? 'border-2 border-vault-accent ring-2 ring-vault-accent/30 scale-[0.98]' : 'border border-vault-border hover:border-vault-accent/50 hover:shadow-[0_8px_30px_rgb(0,0,0,0.5)] hover:-translate-y-1'}`}
   >
+    {/* Checkbox Toggle */}
+    <div onClick={(e) => { e.stopPropagation(); onToggle(item.id); }}
+         className={`absolute top-3 left-3 z-10 w-6 h-6 rounded flex items-center justify-center transition-all ${isSelected ? 'bg-vault-accent text-black scale-100 shadow-md' : 'bg-black/50 border border-white/30 text-transparent opacity-0 group-hover:opacity-100 hover:scale-110'} ${isSelectMode && !isSelected ? 'opacity-100' : ''}`}>
+      <CheckCircle className="w-4 h-4 pointer-events-none" />
+    </div>
+
     <div className="h-48 w-full bg-[#1e1e24] flex items-center justify-center relative overflow-hidden text-vault-text-muted">
       {item.type === 'IMG' && (item.discord_url || item.telegram_url)
         ? <ImageFallback item={item} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
@@ -117,19 +123,21 @@ export default function App() {
 
   // ── Stats ────────────────────────────────────────────────────────────────────
   const stats = useMemo(() => {
-    const total   = mediaItems.length;
-    const archive = mediaItems.filter(m => m.tier === 'ARCHIVE' || m.tier === 'BOTH').length;
-    const hot     = mediaItems.filter(m => m.tier === 'HOT'     || m.tier === 'BOTH').length;
-    const expired = mediaItems.filter(m => m.tier === 'EXPIRED').length;
-    const byType  = { IMG: 0, VID: 0, AUDIO: 0, DOC: 0 };
-    mediaItems.forEach(m => { if (byType[m.type] !== undefined) byType[m.type]++; else byType.DOC++; });
-    return { total, archive, hot, expired, byType };
+    const activeItems = mediaItems.filter(m => m.tier !== 'TRASH');
+    const total       = activeItems.length;
+    const archive     = activeItems.filter(m => m.tier === 'ARCHIVE' || m.tier === 'BOTH').length;
+    const hot         = activeItems.filter(m => m.tier === 'HOT'     || m.tier === 'BOTH').length;
+    const expired     = activeItems.filter(m => m.tier === 'EXPIRED').length;
+    const trash       = mediaItems.filter(m => m.tier === 'TRASH').length;
+    const byType      = { IMG: 0, VID: 0, AUDIO: 0, DOC: 0 };
+    activeItems.forEach(m => { if (byType[m.type] !== undefined) byType[m.type]++; else byType.DOC++; });
+    return { total, archive, hot, expired, trash, byType };
   }, [mediaItems]);
 
   // ── Tag Cloud ────────────────────────────────────────────────────────────────
   const tagCloud = useMemo(() => {
     const counts = {};
-    mediaItems.forEach(m => (m.tags || []).forEach(t => { counts[t] = (counts[t] || 0) + 1; }));
+    mediaItems.filter(m => m.tier !== 'TRASH').forEach(m => (m.tags || []).forEach(t => { counts[t] = (counts[t] || 0) + 1; }));
     return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 20);
   }, [mediaItems]);
 
@@ -147,6 +155,11 @@ export default function App() {
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'vault_media' }, payload => {
         setMediaItems(prev => prev.map(m => m.id === payload.new.id ? payload.new : m));
         setSelectedMedia(prev => prev && prev.id === payload.new.id ? { ...prev, ...payload.new } : prev);
+      })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'vault_media' }, payload => {
+        setMediaItems(prev => prev.filter(m => m.id !== payload.old.id));
+        // Also close the modal if the currently selected file was deleted via another window
+        setSelectedMedia(prev => prev && prev.id === payload.old.id ? null : prev);
       })
       .subscribe();
     return () => supabase.removeChannel(channel);
@@ -191,7 +204,15 @@ export default function App() {
                         (item.display_name || '').toLowerCase().includes(search.toLowerCase()) ||
                         (item.tags || []).some(t => t.toLowerCase().includes(search.toLowerCase()));
     const matchType   = activeType === 'ALL' || item.type === activeType;
-    const matchTier   = activeTier === 'ALL' || item.tier === activeTier;
+    let matchTier     = false;
+    
+    // Hide TRASH items from normal views
+    if (activeTier === 'ALL')          matchTier = item.tier !== 'TRASH';
+    else if (activeTier === 'TRASH')   matchTier = item.tier === 'TRASH';
+    else if (activeTier === 'ARCHIVE') matchTier = item.tier === 'ARCHIVE' || item.tier === 'BOTH';
+    else if (activeTier === 'HOT')     matchTier = item.tier === 'HOT'     || item.tier === 'BOTH';
+    else                               matchTier = item.tier === activeTier;
+
     const matchTag    = !activeTag  || (item.tags || []).includes(activeTag);
     return matchSearch && matchType && matchTier && matchTag;
   }), [search, activeType, activeTier, activeTag, mediaItems]);
@@ -240,6 +261,87 @@ export default function App() {
       } else alert('Save failed: ' + result.error);
     } catch(e) { alert('Error: ' + e.message); }
     setIsSavingMeta(false);
+  };
+
+  // ── Delete / Trash / Restore ─────────────────────────────────────────────────
+  const handleSoftDelete = async () => {
+    if (!selectedMedia || isProcessing) return;
+    setIsProcessing(true);
+    const idToDelete = selectedMedia.id;
+    // Optimistically close modal
+    setSelectedMedia(null); setEditMode(false); setVerifyStatus(null);
+    try {
+      const res = await fetch(`http://localhost:3002/api/delete/${idToDelete}`, { method: 'DELETE' });
+      const result = await res.json();
+      if (!result.success) alert('Move to Trash failed: ' + result.error);
+    } catch(e) { alert('Error: ' + e.message); }
+    setIsProcessing(false);
+  };
+
+  const handleHardDelete = async (id) => {
+    if (isProcessing) return;
+    if (!window.confirm('Are you sure you want to delete this file forever? This action cannot be undone.')) return;
+    setIsProcessing(true);
+    // Optimistically close modal if it's the current one
+    if (selectedMedia && selectedMedia.id === id) { setSelectedMedia(null); setEditMode(false); setVerifyStatus(null); }
+    try {
+      const res = await fetch(`http://localhost:3002/api/hard-delete/${id}`, { method: 'DELETE' });
+      const result = await res.json();
+      if (!result.success) alert('Hard delete failed: ' + result.error);
+    } catch(e) { alert('Error: ' + e.message); }
+    setIsProcessing(false);
+  };
+
+  const handleRestore = async (id) => {
+    if (isProcessing) return;
+    setIsProcessing(true);
+    try {
+      const res = await fetch(`http://localhost:3002/api/restore/${id}`, { method: 'POST' });
+      const result = await res.json();
+      if (!result.success) alert('Restore failed: ' + result.error);
+    } catch(e) { alert('Error: ' + e.message); }
+    setIsProcessing(false);
+  };
+
+  // ── Batch Actions ────────────────────────────────────────────────────────────
+  const toggleSelection = useCallback((id) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const handleCardClick = (item) => {
+    if (isSelectionMode) toggleSelection(item.id);
+    else setSelectedMedia(item);
+  };
+
+  const handleSelectAll = () => {
+    if (selectedIds.size === filteredMedia.length) setSelectedIds(new Set()); // Deselect all
+    else setSelectedIds(new Set(filteredMedia.map(m => m.id)));
+  };
+
+  const handleBatchAction = async (actionType) => {
+    if (actionType === 'hard-delete' && !window.confirm(`Permanently delete ${selectedIds.size} items?`)) return;
+    
+    setBatchProgress({ current: 0, total: selectedIds.size, action: actionType });
+    let count = 0;
+    const ids = Array.from(selectedIds);
+    
+    for (const id of ids) {
+      count++;
+      setBatchProgress({ current: count, total: ids.length, action: actionType });
+      try {
+        if (actionType === 'delete') await fetch(`http://localhost:3002/api/delete/${id}`, { method: 'DELETE' });
+        else if (actionType === 'restore') await fetch(`http://localhost:3002/api/restore/${id}`, { method: 'POST' });
+        else if (actionType === 'hard-delete') await fetch(`http://localhost:3002/api/hard-delete/${id}`, { method: 'DELETE' });
+      } catch (e) { console.error('Batch error on', id, e); }
+    }
+    
+    setBatchProgress(null);
+    setSelectedIds(new Set());
   };
 
   // ── Verify Links (FIX #7) ────────────────────────────────────────────────────
@@ -350,6 +452,7 @@ export default function App() {
               { id: 'HOT',     label: 'Hot Cache (Discord)',  icon: <Zap className="w-4 h-4 text-[#5865F2]"/> },
               { id: 'BOTH',    label: 'Fully Synced',         icon: <RefreshCw className="w-4 h-4 text-emerald-400"/> },
               { id: 'EXPIRED', label: 'Expired Links',        icon: <AlertTriangle className="w-4 h-4 text-red-500"/> },
+              { id: 'TRASH',   label: 'Recently Deleted',     icon: <Trash2 className="w-4 h-4 text-zinc-500"/> },
             ].map(t => (
               <button key={t.id} onClick={() => setActiveTier(t.id)}
                 className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeTier === t.id ? 'bg-vault-surface text-white' : 'text-vault-text-muted hover:text-white hover:bg-vault-surface/50'}`}>
@@ -439,7 +542,7 @@ export default function App() {
               { label: 'Total Files',   value: stats.total,   color: 'text-white',         icon: <BarChart2 className="w-4 h-4"/> },
               { label: 'In Archive',    value: stats.archive, color: 'text-[#0088cc]',     icon: <HardDrive className="w-4 h-4"/> },
               { label: 'In Hot Cache',  value: stats.hot,     color: 'text-[#5865F2]',     icon: <Zap className="w-4 h-4"/> },
-              { label: 'Expired Links', value: stats.expired, color: 'text-red-400',       icon: <AlertTriangle className="w-4 h-4"/> },
+              { label: 'In Trash',      value: stats.trash,   color: 'text-zinc-400',      icon: <Trash2 className="w-4 h-4"/> },
             ].map(s => (
               <div key={s.label} className="bg-vault-surface border border-vault-border rounded-xl px-4 py-3 flex items-center gap-3">
                 <span className={`${s.color} opacity-70`}>{s.icon}</span>
@@ -511,6 +614,15 @@ export default function App() {
         )}
 
         {/* ── Media Grid ────────────────────────────────────────────────────── */}
+        <div className="flex items-center justify-between mb-4">
+          <span className="text-xs font-bold text-vault-text-muted uppercase tracking-widest">{filteredMedia.length} results</span>
+          {filteredMedia.length > 0 && (
+            <button onClick={selectAll} className="text-xs font-bold hover:text-white transition-colors text-vault-accent uppercase px-3 py-1 bg-vault-accent/10 rounded-lg">
+              {selectedIds.size === filteredMedia.length ? 'Deselect All' : 'Select All'}
+            </button>
+          )}
+        </div>
+        
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 flex-1 content-start">
           {isLoading && page === 0 ? (
             <div className="col-span-full h-64 flex flex-col items-center justify-center text-vault-text-muted">
@@ -530,7 +642,16 @@ export default function App() {
             </div>
           ) : filteredMedia.length > 0 ? (
             <>
-              {filteredMedia.map(item => <MediaCard key={item.id} item={item} onClick={setSelectedMedia} />)}
+              {filteredMedia.map(item => (
+                <MediaCard 
+                  key={item.id} 
+                  item={item} 
+                  onClick={setSelectedMedia} 
+                  isSelected={selectedIds.has(item.id)}
+                  isSelectMode={isSelectMode}
+                  onToggle={toggleSelection}
+                />
+              ))}
               {hasMore && (
                 <div ref={observerTarget} className="col-span-full py-8 flex justify-center text-vault-text-muted">
                   <RefreshCw className="w-6 h-6 animate-spin opacity-50" />
@@ -584,9 +705,16 @@ export default function App() {
               </div>
               <div className="flex items-center gap-1 shrink-0">
                 {!editMode
-                  ? <button onClick={() => openEdit(selectedMedia)} className="p-2 hover:bg-[#27272a] rounded-xl transition-colors text-vault-text-muted hover:text-vault-accent" title="Edit metadata">
-                      <Edit3 className="w-4 h-4" />
-                    </button>
+                  ? <>
+                      {selectedMedia.tier !== 'TRASH' && (
+                        <button onClick={handleSoftDelete} disabled={isProcessing} className="p-2 hover:bg-red-500/20 rounded-xl transition-colors text-vault-text-muted hover:text-red-400 disabled:opacity-50" title="Move to Trash">
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      )}
+                      <button onClick={() => openEdit(selectedMedia)} className="p-2 hover:bg-[#27272a] rounded-xl transition-colors text-vault-text-muted hover:text-vault-accent" title="Edit metadata">
+                        <Edit3 className="w-4 h-4" />
+                      </button>
+                    </>
                   : <button onClick={handleSaveMeta} disabled={isSavingMeta} className="p-2 hover:bg-emerald-500/20 rounded-xl transition-colors text-emerald-400 disabled:opacity-50">
                       {isSavingMeta ? <RefreshCw className="w-4 h-4 animate-spin"/> : <Save className="w-4 h-4"/>}
                     </button>
@@ -599,6 +727,21 @@ export default function App() {
             </div>
 
             {/* Tier alert banners */}
+            {selectedMedia.tier === 'TRASH' && (
+              <div className="bg-red-500/10 border-y border-red-500/20 px-4 py-3 flex items-center justify-between">
+                <p className="text-xs text-red-400 font-medium">
+                  🗑️ This file is in the Trash. It will be permanently deleted 30 days after it was trashed.
+                </p>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button onClick={() => handleRestore(selectedMedia.id)} disabled={isProcessing} className="text-xs px-3 py-1.5 bg-zinc-700/50 hover:bg-zinc-700 text-white font-bold rounded-lg transition-colors">
+                    ♻️ Restore
+                  </button>
+                  <button onClick={() => handleHardDelete(selectedMedia.id)} disabled={isProcessing} className="text-xs px-3 py-1.5 bg-red-500 hover:bg-red-600 text-white font-bold rounded-lg transition-colors">
+                    💀 Hard Delete
+                  </button>
+                </div>
+              </div>
+            )}
             {selectedMedia.tier === 'HOT' && (
               <div className="bg-amber-500/10 border-y border-amber-500/20 px-4 py-2 flex items-center justify-between">
                 <p className="text-xs text-amber-400 flex items-center gap-2"><AlertTriangle className="w-4 h-4" /> Hot Cache only — Discord links may expire!</p>
