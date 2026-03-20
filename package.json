@@ -1,0 +1,10 @@
+{
+  "name": "vault",
+  "private": true,
+  "scripts": {
+    "dev:web": "cd vault-web && npm run dev",
+    "dev:bots": "cd vault-bots && node index.js",
+    "build:web": "cd vault-web && npm run build",
+    "install:all": "cd vault-bots && npm install && cd ../vault-web && npm install"
+  }
+}
