@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import {
   Search, Image, Video, FileText, Music, Hash, Download, Link as LinkIcon,
-  X, Filter, HardDrive, Zap, RefreshCw, CloudRain, AlertTriangle, Trash2,
+  X, Filter, HardDrive, RefreshCw, CloudRain, AlertTriangle, Trash2,
   UploadCloud, Plus, CheckCircle, Edit3, Save, BarChart2, ShieldCheck, RotateCcw
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
@@ -13,27 +13,17 @@ const supabase = (supabaseUrl && supabaseKey) ? createClient(supabaseUrl, supaba
 // ── Tier Icon ─────────────────────────────────────────────────────────────────
 const TierIcon = ({ tier }) => {
   if (tier === 'ARCHIVE') return <HardDrive className="w-3 h-3 text-[#0088cc]" />;
-  if (tier === 'HOT')     return <Zap className="w-3 h-3 text-[#5865F2]" />;
   if (tier === 'EXPIRED') return <AlertTriangle className="w-3 h-3 text-red-500" />;
-  return (
-    <div className="flex -space-x-1">
-      <HardDrive className="w-3 h-3 text-[#0088cc]" />
-      <Zap className="w-3 h-3 text-[#5865F2]" />
-    </div>
-  );
+  return <HardDrive className="w-3 h-3 text-[#0088cc]" />;
 };
 
 // ── Image with fallback ───────────────────────────────────────────────────────
 const ImageFallback = ({ item, className }) => {
-  const [src, setSrc] = useState(item.discord_url || item.telegram_url);
+  const [src, setSrc] = useState(item.telegram_url);
   const [err, setErr] = useState(false);
-  const handleError = () => {
-    if (src === item.discord_url && item.telegram_url) setSrc(item.telegram_url);
-    else setErr(true);
-  };
   if (err || !src)
     return <div className="absolute inset-0 bg-red-500/10 flex flex-col items-center justify-center text-red-400 text-xs"><AlertTriangle className="w-6 h-6 mb-1 opacity-50"/>Link Expired</div>;
-  return <img src={src} alt={item.filename} onError={handleError} className={className} />;
+  return <img src={src} alt={item.filename} onError={() => setErr(true)} className={className} />;
 };
 
 // ── Type Icon ─────────────────────────────────────────────────────────────────
@@ -130,13 +120,12 @@ export default function App() {
   const stats = useMemo(() => {
     const activeItems = mediaItems.filter(m => m.tier !== 'TRASH');
     const total       = activeItems.length;
-    const archive     = activeItems.filter(m => m.tier === 'ARCHIVE' || m.tier === 'BOTH').length;
-    const hot         = activeItems.filter(m => m.tier === 'HOT'     || m.tier === 'BOTH').length;
+    const archive     = activeItems.filter(m => m.tier === 'ARCHIVE').length;
     const expired     = activeItems.filter(m => m.tier === 'EXPIRED').length;
     const trash       = mediaItems.filter(m => m.tier === 'TRASH').length;
     const byType      = { IMG: 0, VID: 0, AUDIO: 0, DOC: 0 };
     activeItems.forEach(m => { if (byType[m.type] !== undefined) byType[m.type]++; else byType.DOC++; });
-    return { total, archive, hot, expired, trash, byType };
+    return { total, archive, expired, trash, byType };
   }, [mediaItems]);
 
   // ── Tag Cloud ────────────────────────────────────────────────────────────────
@@ -213,41 +202,14 @@ export default function App() {
     const matchType   = activeType === 'ALL' || item.type === activeType;
     let matchTier     = false;
     
-    // Hide TRASH items from normal views
     if (activeTier === 'ALL')          matchTier = item.tier !== 'TRASH';
     else if (activeTier === 'TRASH')   matchTier = item.tier === 'TRASH';
-    else if (activeTier === 'ARCHIVE') matchTier = item.tier === 'ARCHIVE' || item.tier === 'BOTH';
-    else if (activeTier === 'HOT')     matchTier = item.tier === 'HOT'     || item.tier === 'BOTH';
+    else if (activeTier === 'ARCHIVE') matchTier = item.tier === 'ARCHIVE';
     else                               matchTier = item.tier === activeTier;
 
     const matchTag    = !activeTag  || (item.tags || []).includes(activeTag);
     return matchSearch && matchType && matchTier && matchTag;
   }), [search, activeType, activeTier, activeTag, mediaItems]);
-
-  // ── Promote / Cache ──────────────────────────────────────────────────────────
-  const handlePromote = async (id) => {
-    // FIX #5: Double-click guard — exit immediately if another operation is in flight
-    if (isProcessing) return;
-    setIsProcessing(true);
-    try {
-      const res = await fetch('http://localhost:3002/api/promote', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
-      const result = await res.json();
-      if (!result.success) alert('Promote failed: ' + result.error);
-    } catch(e) { alert('Error: ' + e.message); }
-    setIsProcessing(false);
-  };
-
-  const handleCache = async (id) => {
-    // FIX #5: Double-click guard
-    if (isProcessing) return;
-    setIsProcessing(true);
-    try {
-      const res = await fetch('http://localhost:3002/api/cache', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
-      const result = await res.json();
-      if (!result.success) alert('Cache failed: ' + result.error);
-    } catch(e) { alert('Error: ' + e.message); }
-    setIsProcessing(false);
-  };
 
   // ── Save metadata ────────────────────────────────────────────────────────────
   const handleSaveMeta = async () => {
@@ -456,8 +418,6 @@ export default function App() {
             {[
               { id: 'ALL',     label: 'Everything',          icon: <Hash className="w-4 h-4"/> },
               { id: 'ARCHIVE', label: 'Archive (Telegram)',   icon: <HardDrive className="w-4 h-4 text-[#0088cc]"/> },
-              { id: 'HOT',     label: 'Hot Cache (Discord)',  icon: <Zap className="w-4 h-4 text-[#5865F2]"/> },
-              { id: 'BOTH',    label: 'Fully Synced',         icon: <RefreshCw className="w-4 h-4 text-emerald-400"/> },
               { id: 'EXPIRED', label: 'Expired Links',        icon: <AlertTriangle className="w-4 h-4 text-red-500"/> },
               { id: 'TRASH',   label: 'Recently Deleted',     icon: <Trash2 className="w-4 h-4 text-zinc-500"/> },
             ].map(t => (
@@ -526,7 +486,7 @@ export default function App() {
         <header className="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center mb-6">
           <div>
             <h2 className="text-3xl font-bold tracking-tight">Your Media</h2>
-            <p className="text-vault-text-muted text-sm mt-1">Manage unified files across Archive &amp; Hot Cache</p>
+            <p className="text-vault-text-muted text-sm mt-1">Manage your files in the Telegram Archive</p>
           </div>
           <div className="flex items-center gap-3 w-full md:w-auto">
             <div className="relative flex-1 md:w-72 group">
@@ -544,11 +504,10 @@ export default function App() {
 
         {/* ── Stats Bar ─────────────────────────────────────────────────────── */}
         {isConnected && (
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-8">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-8">
             {[
               { label: 'Total Files',   value: stats.total,   color: 'text-white',         icon: <BarChart2 className="w-4 h-4"/> },
               { label: 'In Archive',    value: stats.archive, color: 'text-[#0088cc]',     icon: <HardDrive className="w-4 h-4"/> },
-              { label: 'In Hot Cache',  value: stats.hot,     color: 'text-[#5865F2]',     icon: <Zap className="w-4 h-4"/> },
               { label: 'In Trash',      value: stats.trash,   color: 'text-zinc-400',      icon: <Trash2 className="w-4 h-4"/> },
             ].map(s => (
               <div key={s.label} className="bg-vault-surface border border-vault-border rounded-xl px-4 py-3 flex items-center gap-3">
@@ -681,7 +640,7 @@ export default function App() {
           {isLoading && page === 0 ? (
             <div className="col-span-full h-64 flex flex-col items-center justify-center text-vault-text-muted">
               <div className="w-8 h-8 border-2 border-vault-accent border-t-transparent rounded-full animate-spin mb-4" />
-              <p>Syncing your two-tier vault...</p>
+              <p>Loading your vault...</p>
             </div>
           // FIX #8: Show real error message instead of misleading empty vault state
           ) : fetchError ? (
@@ -796,35 +755,22 @@ export default function App() {
                 </div>
               </div>
             )}
-            {selectedMedia.tier === 'HOT' && (
-              <div className="bg-amber-500/10 border-y border-amber-500/20 px-4 py-2 flex items-center justify-between">
-                <p className="text-xs text-amber-400 flex items-center gap-2"><AlertTriangle className="w-4 h-4" /> Hot Cache only — Discord links may expire!</p>
-                <button onClick={() => handlePromote(selectedMedia.id)} disabled={isProcessing}
-                  className="text-xs bg-amber-500 text-[#18181b] font-bold px-3 py-1 rounded-md hover:bg-amber-400 disabled:opacity-50 flex items-center gap-1">
-                  {isProcessing ? <RefreshCw className="w-3 h-3 animate-spin"/> : <HardDrive className="w-3 h-3"/>} Promote to Archive
-                </button>
-              </div>
-            )}
             {selectedMedia.tier === 'ARCHIVE' && (
               <div className="bg-[#0088cc]/10 border-y border-[#0088cc]/20 px-4 py-2 flex items-center justify-between">
-                <p className="text-xs text-[#0088cc] flex items-center gap-2"><CloudRain className="w-4 h-4" /> Archive only — cache to Discord for fast delivery.</p>
-                <button onClick={() => handleCache(selectedMedia.id)} disabled={isProcessing}
-                  className="text-xs bg-[#0088cc] text-white font-bold px-3 py-1 rounded-md hover:brightness-110 disabled:opacity-50 flex items-center gap-1">
-                  {isProcessing ? <RefreshCw className="w-3 h-3 animate-spin"/> : <Zap className="w-3 h-3"/>} Cache to Hot
-                </button>
+                <p className="text-xs text-[#0088cc] flex items-center gap-2"><CloudRain className="w-4 h-4" /> Stored in Telegram Archive</p>
               </div>
             )}
 
             {/* Preview area */}
             <div className="flex-1 overflow-auto bg-black/50 min-h-[250px] flex items-center justify-center relative w-full">
-              {selectedMedia.type === 'IMG' && (selectedMedia.discord_url || selectedMedia.telegram_url)
+              {selectedMedia.type === 'IMG' && selectedMedia.telegram_url
                 ? <ImageFallback item={selectedMedia} className="max-w-full max-h-[50vh] object-contain" />
-                : selectedMedia.type === 'VID' && (selectedMedia.discord_url || selectedMedia.telegram_url)
-                ? <video controls autoPlay src={selectedMedia.discord_url || selectedMedia.telegram_url} className="max-w-full max-h-[50vh] w-full outline-none bg-black" />
-                : selectedMedia.type === 'AUDIO' && (selectedMedia.discord_url || selectedMedia.telegram_url)
+                : selectedMedia.type === 'VID' && selectedMedia.telegram_url
+                ? <video controls autoPlay src={selectedMedia.telegram_url} className="max-w-full max-h-[50vh] w-full outline-none bg-black" />
+                : selectedMedia.type === 'AUDIO' && selectedMedia.telegram_url
                 ? <div className="flex flex-col items-center justify-center w-full p-8">
                     <Music className="w-28 h-28 mb-6 text-vault-accent opacity-80" />
-                    <audio controls autoPlay src={selectedMedia.discord_url || selectedMedia.telegram_url} className="w-full max-w-md" />
+                    <audio controls autoPlay src={selectedMedia.telegram_url} className="w-full max-w-md" />
                   </div>
                 : <div className="flex flex-col items-center justify-center text-vault-text-muted opacity-40">
                     <TypeIcon type={selectedMedia.type} className="w-20 h-20 mb-3" />
@@ -867,33 +813,28 @@ export default function App() {
                     <span className={`px-2 py-0.5 rounded-full font-bold ${verifyStatus.telegram === 'ok' ? 'bg-emerald-500/20 text-emerald-400' : verifyStatus.telegram === 'none' ? 'bg-zinc-700 text-zinc-400' : 'bg-red-500/20 text-red-400'}`}>
                       TG: {verifyStatus.telegram}
                     </span>
-                    <span className={`px-2 py-0.5 rounded-full font-bold ${verifyStatus.discord === 'ok' ? 'bg-emerald-500/20 text-emerald-400' : verifyStatus.discord === 'none' ? 'bg-zinc-700 text-zinc-400' : 'bg-red-500/20 text-red-400'}`}>
-                      DC: {verifyStatus.discord}
-                    </span>
                   </div>
                 )}
                 {verifyStatus?.error && <p className="text-xs text-red-400">{verifyStatus.error}</p>}
 
                 <div className="flex items-center gap-2 shrink-0 flex-wrap">
-                  {/* FIX #1 — Refresh stale Telegram URL */}
-                  {(selectedMedia.tier === 'ARCHIVE' || selectedMedia.tier === 'BOTH') && (
+                  {selectedMedia.tier === 'ARCHIVE' && (
                     <button onClick={handleRefreshUrl} disabled={isRefreshing}
                       title="Regenerate fresh Telegram URL from permanent file_id"
                       className="flex items-center gap-1.5 px-3 py-2 hover:bg-[#27272a] rounded-lg text-sm font-medium transition-colors text-vault-text-muted hover:text-[#0088cc] disabled:opacity-40">
                       {isRefreshing ? <RefreshCw className="w-4 h-4 animate-spin"/> : <RotateCcw className="w-4 h-4" />} Refresh URL
                     </button>
                   )}
-                  {/* FIX #7 — Verify link health */}
                   <button onClick={handleVerify} disabled={verifyStatus === 'checking'}
-                    title="Check if both stored links are still reachable"
+                    title="Check if stored link is still reachable"
                     className="flex items-center gap-1.5 px-3 py-2 hover:bg-[#27272a] rounded-lg text-sm font-medium transition-colors text-vault-text-muted hover:text-emerald-400 disabled:opacity-40">
                     {verifyStatus === 'checking' ? <RefreshCw className="w-4 h-4 animate-spin"/> : <ShieldCheck className="w-4 h-4" />} Verify
                   </button>
-                  <button onClick={() => navigator.clipboard.writeText(selectedMedia.discord_url || selectedMedia.telegram_url || '')}
+                  <button onClick={() => navigator.clipboard.writeText(selectedMedia.telegram_url || '')}
                     className="flex items-center gap-2 px-3 py-2 hover:bg-[#27272a] rounded-lg text-sm font-medium transition-colors">
                     <LinkIcon className="w-4 h-4" /> Copy
                   </button>
-                  <a href={selectedMedia.discord_url || selectedMedia.telegram_url} target="_blank" rel="noreferrer"
+                  <a href={selectedMedia.telegram_url} target="_blank" rel="noreferrer"
                     className="flex items-center gap-2 px-4 py-2 bg-vault-accent hover:brightness-110 text-white rounded-lg text-sm font-medium shadow-lg shadow-vault-accent/20">
                     <Download className="w-4 h-4" /> Download
                   </a>
