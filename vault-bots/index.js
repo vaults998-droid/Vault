@@ -1,12 +1,10 @@
 require('dotenv').config();
 const { Telegraf } = require('telegraf');
-const { Client, GatewayIntentBits, Events } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 const multer = require('multer');
-// FIX #10: Removed unused `fs` and `path` imports
 
 // Multer: store uploads in memory (buffer), max 100MB
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
@@ -19,65 +17,45 @@ if (!supabaseUrl || !supabaseKey) {
 }
 const supabase = (supabaseUrl && supabaseKey) ? createClient(supabaseUrl, supabaseKey) : null;
 
-// Track bots and recent chats to know where to upload files from the dashboard API
+// Track Telegram bot and recent chat
 let tgBot = null;
-let discordClient = null;
 let lastTelegramChatId = null;
-let lastDiscordChannelId = null;
 
-// Helper function to save media to two-tier Supabase DB
-// Accepts optional file_unique_id (Telegram) for stable identity-based dedup
-async function saveMediaToDb({ filename, type, source, size, date, url, telegram_file_id, file_unique_id, tags }) {
+// Helper function to save media to Supabase DB
+async function saveMediaToDb({ filename, type, size, date, url, telegram_file_id, file_unique_id, tags }) {
   if (!supabase) return true;
 
-  // FIX #1: Use file_unique_id (stable Telegram identity) as hash key when available.
-  // This prevents re-uploads of the same photo creating duplicate DB rows, because
-  // Telegram photos get auto-generated filenames like photo_<timestamp>.jpg which
-  // are always different. file_unique_id is stable across all bots for the same file.
   const hashInput  = file_unique_id ? `tg_unique:${file_unique_id}` : (filename + size);
   const file_hash  = crypto.createHash('sha256').update(hashInput).digest('hex');
 
-  const tierTag    = source === 'telegram' ? 'archive' : 'hot';
   const typeTag    = type.toLowerCase();
-  const uniqueTags = [...new Set([tierTag, typeTag, ...tags].map(t => typeof t === 'string' ? t.toLowerCase() : t))];
+  const uniqueTags = [...new Set([typeTag, ...tags].map(t => typeof t === 'string' ? t.toLowerCase() : t))];
 
   try {
     const { data: existing } = await supabase
       .from('vault_media').select('*').eq('file_hash', file_hash).limit(1).maybeSingle();
 
     if (existing) {
-      // UPGRADE existing record — never overwrite an already-stored Archive URL
-      let newTier      = existing.tier;
       let updatePayload = { tags: [...new Set([...(existing.tags || []), ...uniqueTags])] };
 
-      if (source === 'telegram') {
-        if (existing.tier === 'HOT' || existing.tier === 'EXPIRED') newTier = 'BOTH';
-        if (!existing.telegram_url) {
-          updatePayload.telegram_url = url;
-          if (telegram_file_id) updatePayload.telegram_file_id = telegram_file_id;
-        }
-        if (telegram_file_id && !existing.telegram_file_id) updatePayload.telegram_file_id = telegram_file_id;
-      } else {
-        if (existing.tier === 'ARCHIVE') newTier = 'BOTH';
-        updatePayload.discord_url = url;
+      if (!existing.telegram_url) {
+        updatePayload.telegram_url = url;
+      }
+      if (telegram_file_id && !existing.telegram_file_id) {
+        updatePayload.telegram_file_id = telegram_file_id;
       }
 
-      updatePayload.tier = newTier;
       const { error } = await supabase.from('vault_media').update(updatePayload).eq('id', existing.id);
       if (error) throw error;
       return true;
     } else {
-      // NEW ENTRY
-      const isTelegram = source === 'telegram';
       const insertPayload = {
         file_hash, filename, type,
-        tier:             isTelegram ? 'ARCHIVE' : 'HOT',
+        tier:             'ARCHIVE',
         size_bytes:       size,
         date_added:       date,
-        telegram_url:     isTelegram ? url : null,
-        telegram_file_id: isTelegram ? (telegram_file_id || null) : null,
-        discord_url:      isTelegram ? null : url,
-        promote_attempts: 0,
+        telegram_url:     url,
+        telegram_file_id: telegram_file_id || null,
         tags:             uniqueTags
       };
       const { error } = await supabase.from('vault_media').insert([insertPayload]);
@@ -175,12 +153,11 @@ if (telegrafToken) {
       const success = await saveMediaToDb({
         filename,
         type,
-        source:           'telegram',
         size:             formatSize(size),
         date:             dateStr,
         url:              fileUrl.href,
         telegram_file_id: fileId,
-        file_unique_id,               // FIX #1: passed for stable hash
+        file_unique_id,
         tags
       });
 
@@ -206,151 +183,14 @@ if (telegrafToken) {
 }
 
 // ----------------------------------------------------
-// 3. Discord Bot
-// ----------------------------------------------------
-const discordToken = process.env.DISCORD_BOT_TOKEN;
-if (discordToken) {
-  discordClient = new Client({
-    intents: [
-      GatewayIntentBits.Guilds,
-      GatewayIntentBits.GuildMessages,
-      GatewayIntentBits.MessageContent,
-    ],
-  });
-
-  discordClient.once(Events.ClientReady, c => {
-    console.log(`✅ Discord Bot Started. Logged in as ${c.user.tag}`);
-  });
-
-  discordClient.on(Events.MessageCreate, async (message) => {
-    if (message.author.bot) return;
-    if (process.env.DISCORD_OWNER_ID && message.author.id !== process.env.DISCORD_OWNER_ID) return;
-
-    lastDiscordChannelId = process.env.DISCORD_CACHE_CHANNEL_ID || message.channel.id;
-
-    if (message.attachments.size === 0) return;
-
-    // FIX #5: Process all attachments first, then send ONE summary reply to avoid rate limits
-    const results = [];
-    for (const [, attachment] of message.attachments) {
-      const content = message.content || '';
-      const tags    = content.match(/#[\w-]+/g)?.map(t => t.replace('#', '')) || [];
-      const dateStr = new Date().toISOString().split('T')[0];
-      const type    = getFileType(attachment.contentType);
-      const sizeStr = formatSize(attachment.size ?? 0);
-
-      const success = await saveMediaToDb({
-        filename: attachment.name,
-        type,
-        source: 'discord',
-        size:   sizeStr,
-        date:   dateStr,
-        url:    attachment.url,
-        tags
-      });
-      results.push({ name: attachment.name, sizeStr, success });
-    }
-
-    // One reply summarising all attachments — stays well within Discord rate limits
-    const saved  = results.filter(r => r.success);
-    const failed = results.filter(r => !r.success);
-    const lines  = [];
-    if (saved.length)  lines.push(`✅ Saved ${saved.length} file(s) to Hot Cache: ${saved.map(r => `\`${r.name}\``).join(', ')}`);
-    if (failed.length) lines.push(`❌ Failed to save: ${failed.map(r => `\`${r.name}\``).join(', ')}`);
-    if (lines.length)  message.reply(lines.join('\n')).catch(() => {}); // .catch: ignore reply failures
-  });
-
-  discordClient.login(discordToken).catch(e => {
-    console.error('Discord Login Error:', e);
-  });
-} else {
-  console.log('⚠️  Discord token missing. Skipping Discord bot.');
-}
-
-// ----------------------------------------------------
-// 4. API Server for Web UI requests (Promote & Cache)
+// 3. API Server for Web UI requests
 // ----------------------------------------------------
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.post('/api/promote', async (req, res) => {
-  try {
-    const { id } = req.body;
-    const { data: file, error: fetchErr } = await supabase.from('vault_media').select('*').eq('id', id).single();
-    if (fetchErr || !file) return res.status(404).json({ error: 'File not found in database.' });
-    if (!file.discord_url)  return res.status(400).json({ error: 'File has no Discord URL to promote from.' });
-
-    const activeTgChatId = process.env.TELEGRAM_ARCHIVE_CHAT_ID || lastTelegramChatId;
-    if (!activeTgChatId || !tgBot) return res.status(400).json({ error: 'No Telegram active chat to upload to! Send a random message to the bot first (or config env).' });
-
-    const msg = await tgBot.telegram.sendDocument(activeTgChatId, file.discord_url, {
-      caption: `[PROMOTED TO ARCHIVE] ${file.filename}`
-    });
-
-    const fileId = msg.document?.file_id || msg.video?.file_id || msg.audio?.file_id || msg.photo?.[msg.photo.length-1]?.file_id || msg.sticker?.file_id;
-    const file_unique_id = msg.document?.file_unique_id || msg.video?.file_unique_id || msg.audio?.file_unique_id || msg.photo?.[msg.photo.length-1]?.file_unique_id || msg.sticker?.file_unique_id;
-    if (!fileId) return res.status(500).json({ error: 'Telegram upload succeeded but could not extract file_id.' });
-
-    const fileUrl = await tgBot.telegram.getFileLink(fileId);
-    const updatedTags = [...new Set([...file.tags, 'archive'])];
-
-    // FIX #2: Save telegram_file_id so this file can have its URL refreshed in the future
-    await supabase.from('vault_media').update({
-      telegram_url:     fileUrl.href,
-      telegram_file_id: fileId,
-      tier:             'BOTH',
-      tags:             updatedTags
-    }).eq('id', file.id);
-
-    // FIX #1: Sync back the dedup ID if possible (although this might just be an update, keeping it safe)
-    res.json({ success: true, url: fileUrl.href, tier: 'BOTH', tags: updatedTags });
-  } catch(e) {
-    console.error('Promote failed:', e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/api/cache', async (req, res) => {
-  try {
-    const { id } = req.body;
-    const { data: file, error: fetchErr } = await supabase.from('vault_media').select('*').eq('id', id).single();
-    if (fetchErr || !file) return res.status(404).json({ error: 'File not found in database.' });
-
-    // FIX #3: Reject EXPIRED files — their telegram_url may be stale/dead
-    if (file.tier === 'EXPIRED') return res.status(400).json({ error: 'Cannot cache an EXPIRED file. Refresh the Telegram URL first.' });
-    if (!file.telegram_url)     return res.status(400).json({ error: 'File has no Telegram Archive URL to cache from.' });
-
-    const activeDiscordChannelId = process.env.DISCORD_CACHE_CHANNEL_ID || lastDiscordChannelId;
-    if (!activeDiscordChannelId || !discordClient) return res.status(400).json({ error: 'No Discord active channel to upload to! Send a message to the channel first (or config env).' });
-
-    const channel = await discordClient.channels.fetch(activeDiscordChannelId);
-    if (!channel) return res.status(400).json({ error: 'Could not fetch discord channel.' });
-
-    const msg = await channel.send({
-      content: `[CACHED TO HOT] ${file.filename}`,
-      files: [file.telegram_url]
-    });
-
-    const uploadedAttachment = msg.attachments.first();
-    if (!uploadedAttachment) return res.status(500).json({ error: 'Discord upload succeeded but no attachment URL returned.' });
-
-    const updatedTags = [...new Set([...file.tags, 'hot'])];
-    await supabase.from('vault_media').update({
-      discord_url: uploadedAttachment.url,
-      tier: 'BOTH',
-      tags: updatedTags
-    }).eq('id', file.id);
-
-    return res.json({ success: true, url: uploadedAttachment.url, tier: 'BOTH', tags: updatedTags });
-  } catch(e) {
-    console.error('Cache failed:', e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
 // ----------------------------------------------------
-// 5. Direct Upload API (Web UI -> Telegram Archive)
+// 4. Direct Upload API (Web UI -> Telegram Archive)
 // ----------------------------------------------------
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
@@ -368,8 +208,6 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     const type    = getFileType(mimetype);
     const sizeStr = formatSize(size);
 
-    // FIX #2: Removed dead `require('telegraf/types')` — InputFile is a types-only export with no
-    // runtime value. Telegraf accepts { source, filename } natively without it.
     const msg = await tgBot.telegram.sendDocument(
       activeTgChatId,
       { source: buffer, filename: originalname },
@@ -395,11 +233,10 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     const saved = await saveMediaToDb({
       filename: originalname,
       type,
-      source: 'telegram',
       size: sizeStr,
       date: dateStr,
       url: fileUrl.href,
-      telegram_file_id: fileId,  // FIX #1: Store permanent file_id for web-uploaded files
+      telegram_file_id: fileId,
       file_unique_id,
       tags: ['web-upload', ...tags]
     });
@@ -415,75 +252,32 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 });
 
 // ----------------------------------------------------
-// 6. Cron Job — Smart Auto-Promote + Expiry Sweep (with retry counter)
+// 6. Cron Job — Verify Telegram URLs and Purge Trash
 // ----------------------------------------------------
-const MAX_PROMOTE_ATTEMPTS = 3;
-
 setInterval(async () => {
   if (!supabase) return;
   try {
-    // FIX #4: Check for and log Supabase query errors rather than silently discarding them
-    const { data: hotFiles, error: sweepErr } = await supabase.from('vault_media').select('*').eq('tier', 'HOT');
-    if (sweepErr) { console.error('[Sweeper] ❌ Supabase query error:', sweepErr.message); return; }
-    if (!hotFiles || hotFiles.length === 0) return;
+    // Phase 1: Verify EXPIRED files and try to refresh Telegram URLs
+    const { data: expiredFiles, error: err } = await supabase.from('vault_media').select('*').eq('tier', 'EXPIRED');
+    if (err) { console.error('[Sweeper] ❌ Supabase query error:', err.message); return; }
 
-    const ONE_DAY = 24 * 60 * 60 * 1000;
-    const WARN_AT = 20 * 60 * 60 * 1000;
-    const now     = Date.now();
-
-    for (const file of hotFiles) {
-      const age      = now - new Date(file.created_at).getTime();
-      const attempts = file.promote_attempts || 0;
-
-      if (age >= ONE_DAY) {
-        if (attempts >= MAX_PROMOTE_ATTEMPTS) {
-          await supabase.from('vault_media').update({ tier: 'EXPIRED' }).eq('id', file.id);
-          console.log(`[Sweeper] ⚠️  Exhausted retries. Marked #${file.id} "${file.filename}" as EXPIRED.`);
-          continue; // Skip further processing for this file
-        } else {
-          console.log(`[Sweeper] 🔁 Retrying promote for #${file.id} (attempt ${attempts + 1}/${MAX_PROMOTE_ATTEMPTS})`);
-        }
-      }
-
-      if (age >= WARN_AT && attempts < MAX_PROMOTE_ATTEMPTS) {
-        const activeTgChatId = process.env.TELEGRAM_ARCHIVE_CHAT_ID || lastTelegramChatId;
-        if (!activeTgChatId || !tgBot) {
-          console.log(`[Sweeper] ⏳ File #${file.id} nearing expiry but no Telegram target set.`);
-          await supabase.from('vault_media').update({ promote_attempts: attempts + 1 }).eq('id', file.id);
-          continue;
-        }
+    if (expiredFiles && expiredFiles.length > 0 && tgBot) {
+      for (const file of expiredFiles) {
+        if (!file.telegram_file_id) continue;
         try {
-          const msg = await tgBot.telegram.sendDocument(activeTgChatId, file.discord_url, {
-            caption: `[AUTO-PROMOTED] ${file.filename} — archived before Discord link expired.`
-          });
-
-          // FIX #2: Guard undefined fileId before calling getFileLink — failure increments counter
-          const fileId = msg.document?.file_id || msg.video?.file_id || msg.audio?.file_id || msg.photo?.[msg.photo.length-1]?.file_id || msg.sticker?.file_id;
-          if (!fileId) {
-            await supabase.from('vault_media').update({ promote_attempts: attempts + 1 }).eq('id', file.id);
-            console.error(`[Sweeper] ❌ Auto-promote for #${file.id} returned no file_id. Incrementing attempt counter.`);
-            continue;
-          }
-
-          const fileUrl = await tgBot.telegram.getFileLink(fileId);
-
-          await supabase.from('vault_media').update({
-            telegram_url:     fileUrl.href,
-            telegram_file_id: fileId,
-            tier:             'BOTH',
-            promote_attempts: attempts + 1,
-            tags: [...new Set([...(file.tags || []), 'auto-promoted'])]
+          const freshUrl = await tgBot.telegram.getFileLink(file.telegram_file_id);
+          await supabase.from('vault_media').update({ 
+            telegram_url: freshUrl.href,
+            tier: 'ARCHIVE'
           }).eq('id', file.id);
-
-          console.log(`[Sweeper] ✅ Auto-promoted #${file.id} "${file.filename}" to Archive.`);
-        } catch (promoteErr) {
-          await supabase.from('vault_media').update({ promote_attempts: attempts + 1 }).eq('id', file.id);
-          console.error(`[Sweeper] ❌ Promote attempt ${attempts + 1} failed for #${file.id}: ${promoteErr.message}`);
+          console.log(`[Sweeper] ✅ Refreshed URL for #${file.id} "${file.filename}" — back to ARCHIVE`);
+        } catch (refreshErr) {
+          console.error(`[Sweeper] ❌ Failed to refresh #${file.id}: ${refreshErr.message}`);
         }
       }
     }
 
-    // ── Sweeper Phase 2: Purge TRASH older than 30 days
+    // ── Phase 2: Purge TRASH older than 30 days
     const { data: trashFiles } = await supabase.from('vault_media').select('id, link_verified_at, filename').eq('tier', 'TRASH');
     if (trashFiles && trashFiles.length > 0) {
       const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
@@ -547,7 +341,7 @@ app.delete('/api/delete/:id', async (req, res) => {
 });
 
 // ----------------------------------------------------
-// 7.6. Restore API (TRASH → Original Tier)
+// 7.6. Restore API (TRASH → ARCHIVE)
 // ----------------------------------------------------
 app.post('/api/restore/:id', async (req, res) => {
   try {
@@ -558,19 +352,15 @@ app.post('/api/restore/:id', async (req, res) => {
     if (fetchErr || !file) return res.status(404).json({ error: 'File not found' });
     if (file.tier !== 'TRASH') return res.status(400).json({ error: 'File is not in TRASH' });
 
-    let restoredTier = 'HOT';
-    if (file.telegram_url && file.discord_url) restoredTier = 'BOTH';
-    else if (file.telegram_url || file.telegram_file_id) restoredTier = 'ARCHIVE';
-
     const { error } = await supabase.from('vault_media').update({
-      tier: restoredTier,
+      tier: 'ARCHIVE',
       link_verified_at: null // clear the deletion timer
     }).eq('id', id);
 
     if (error) return res.status(500).json({ error: `DB error: ${error.message}` });
     
-    res.json({ success: true, tier: restoredTier });
-    console.log(`[Restore] ♻️ Restored item #${id} to ${restoredTier}`);
+    res.json({ success: true, tier: 'ARCHIVE' });
+    console.log(`[Restore] ♻️ Restored item #${id} to ARCHIVE`);
   } catch(e) {
     console.error('Restore failed:', e);
     res.status(500).json({ error: e.message });
@@ -625,19 +415,16 @@ app.post('/api/refresh-url', async (req, res) => {
 });
 
 // ----------------------------------------------------
-// 9. FIX #7 — Verify that stored URLs are still reachable
+// 9. Verify that stored Telegram URL is still reachable
 // ----------------------------------------------------
 app.post('/api/verify-links', async (req, res) => {
   try {
     const { id } = req.body;
     if (!id) return res.status(400).json({ error: 'id is required' });
 
-    // FIX #4: Propagate Supabase .single() errors rather than silently discarding them
     const { data: file, error: fetchErr } = await supabase.from('vault_media').select('*').eq('id', id).single();
     if (fetchErr) return res.status(500).json({ error: `DB error: ${fetchErr.message}` });
     if (!file)    return res.status(404).json({ error: 'File not found.' });
-
-    const results = { telegram: null, discord: null };
 
     const checkUrl = async (url) => {
       if (!url) return 'none';
@@ -647,8 +434,9 @@ app.post('/api/verify-links', async (req, res) => {
       } catch { return 'dead'; }
     };
 
-    // Try to regenerate Telegram URL from file_id before verifying
     let tgUrlToCheck = file.telegram_url;
+    let telegramResult = 'none';
+
     if (file.telegram_file_id && tgBot) {
       try {
         const freshUrl = await tgBot.telegram.getFileLink(file.telegram_file_id);
@@ -657,27 +445,23 @@ app.post('/api/verify-links', async (req, res) => {
       } catch { /* use stored URL as fallback */ }
     }
 
-    results.telegram = await checkUrl(tgUrlToCheck);
-    results.discord  = await checkUrl(file.discord_url);
-
+    telegramResult = await checkUrl(tgUrlToCheck);
     const now = new Date().toISOString();
 
-    // Determine new tier based on which links are alive
     let newTier = file.tier;
-    const tgAlive   = results.telegram === 'ok' || results.telegram === 'none';
-    const discAlive = results.discord  === 'ok' || results.discord  === 'none';
-    const hasTg     = !!file.telegram_url || !!file.telegram_file_id;
-    const hasDisc   = !!file.discord_url;
-
-    if (!tgAlive && !discAlive && (hasTg || hasDisc)) newTier = 'EXPIRED';
+    if (telegramResult === 'dead' && (file.telegram_url || file.telegram_file_id)) {
+      newTier = 'EXPIRED';
+    } else if (telegramResult === 'ok') {
+      newTier = 'ARCHIVE';
+    }
 
     await supabase.from('vault_media').update({
       link_verified_at: now,
       tier: newTier
     }).eq('id', id);
 
-    res.json({ success: true, results, tier: newTier, verified_at: now });
-    console.log(`[Verify] #${id} "${file.filename}" — Telegram: ${results.telegram}, Discord: ${results.discord}`);
+    res.json({ success: true, results: { telegram: telegramResult }, tier: newTier, verified_at: now });
+    console.log(`[Verify] #${id} "${file.filename}" — Telegram: ${telegramResult}`);
   } catch(e) {
     console.error('Verify links failed:', e);
     res.status(500).json({ error: e.message });

@@ -49,7 +49,7 @@ const MediaCard = ({ item, onClick, isSelected, isSelectMode, onToggle }) => (
     </div>
 
     <div className="h-48 w-full bg-[#1e1e24] flex items-center justify-center relative overflow-hidden text-vault-text-muted">
-      {item.type === 'IMG' && (item.discord_url || item.telegram_url)
+      {item.type === 'IMG' && item.telegram_url
         ? <ImageFallback item={item} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
         : <TypeIcon type={item.type} className="w-16 h-16 opacity-50 group-hover:scale-110 transition-transform duration-300 group-hover:text-vault-accent" />
       }
