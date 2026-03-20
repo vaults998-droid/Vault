@@ -189,6 +189,26 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// SSE for upload progress
+let activeUploadRes = null;
+app.get('/api/upload-progress', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  activeUploadRes = res;
+  
+  req.on('close', () => {
+    activeUploadRes = null;
+  });
+});
+
+function emitUploadProgress(completed, total) {
+  if (activeUploadRes) {
+    activeUploadRes.write(`data: ${JSON.stringify({ completed, total })}\n\n`);
+  }
+}
+
 // ----------------------------------------------------
 // 4. Direct Upload API (Web UI -> Telegram Archive) - Parallel
 // ----------------------------------------------------
@@ -273,19 +293,30 @@ app.post('/api/upload', upload.array('files', 50), async (req, res) => {
     const tagsRaw = req.body.tags || '';
     const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim().toLowerCase()).filter(Boolean) : [];
 
-    const results = await Promise.allSettled(
-      req.files.map(file => uploadToTelegram(file.buffer, file.originalname, file.mimetype, tags))
-    );
+    // Process files with progress tracking
+    const total = req.files.length;
+    let completed = 0;
+    const results = [];
+    const errors = [];
 
-    const successful = results.filter(r => r.status === 'fulfilled').map(r => r.value);
-    const failed = results.filter(r => r.status === 'rejected').map(r => r.reason.message);
+    for (const file of req.files) {
+      try {
+        const result = await uploadToTelegram(file.buffer, file.originalname, file.mimetype, tags);
+        results.push(result);
+      } catch (e) {
+        errors.push({ filename: file.originalname, error: e.message });
+      }
+      completed++;
+      emitUploadProgress(completed, total);
+    }
 
     res.json({
       success: true,
-      completed: successful.length,
-      failed: failed.length,
-      results: successful,
-      errors: failed
+      completed: results.length,
+      failed: errors.length,
+      total,
+      results,
+      errors
     });
 
   } catch (e) {

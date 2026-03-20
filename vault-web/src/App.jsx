@@ -41,12 +41,12 @@ const TypeIcon = ({ type, className = '' }) => {
 const MediaCard = ({ item, onClick, isSelected, isSelectMode, onToggle }) => (
   <div
     onClick={() => isSelectMode ? onToggle(item.id) : onClick(item)}
-    className={`group relative flex flex-col bg-vault-surface rounded-xl overflow-hidden cursor-pointer transition-all duration-300 ${isSelected ? 'border-2 border-vault-accent ring-2 ring-vault-accent/30 scale-[0.98]' : 'border border-vault-border hover:border-vault-accent/50 hover:shadow-[0_8px_30px_rgb(0,0,0,0.5)] hover:-translate-y-1'}`}
+    className={`group relative flex flex-col bg-vault-surface rounded-xl overflow-hidden cursor-pointer transition-all duration-300 min-h-[48px] ${isSelected ? 'border-2 border-vault-accent ring-2 ring-vault-accent/30 scale-[0.98]' : 'border border-vault-border hover:border-vault-accent/50 hover:shadow-[0_8px_30px_rgb(0,0,0,0.5)] hover:-translate-y-1'}`}
   >
     {/* Checkbox Toggle */}
     <div onClick={(e) => { e.stopPropagation(); onToggle(item.id); }}
-         className={`absolute top-3 left-3 z-10 w-6 h-6 rounded flex items-center justify-center transition-all ${isSelected ? 'bg-vault-accent text-black scale-100 shadow-md' : 'bg-black/50 border border-white/30 text-transparent opacity-0 group-hover:opacity-100 hover:scale-110'} ${isSelectMode && !isSelected ? 'opacity-100' : ''}`}>
-      <CheckCircle className="w-4 h-4 pointer-events-none" />
+         className={`absolute top-3 left-3 z-10 w-8 h-8 rounded flex items-center justify-center transition-all ${isSelected ? 'bg-vault-accent text-black scale-100 shadow-md' : 'bg-black/50 border border-white/30 text-transparent opacity-0 group-hover:opacity-100 hover:scale-110'} ${isSelectMode && !isSelected ? 'opacity-100' : ''}`}>
+      <CheckCircle className="w-5 h-5 pointer-events-none" />
     </div>
 
     <div className="h-48 w-full bg-[#1e1e24] flex items-center justify-center relative overflow-hidden text-vault-text-muted">
@@ -92,6 +92,7 @@ export default function App() {
   const [fetchError,    setFetchError]    = useState(null); // FIX #8: surface DB errors to UI
   const [isConnected,   setIsConnected]   = useState(false);
   const [isProcessing,  setIsProcessing]  = useState(false);
+  const [sidebarOpen,   setSidebarOpen]   = useState(false);
 
   // ── Multi-select state ──────────────────────────────────────────────────────
   const [selectedIds,       setSelectedIds]       = useState(new Set());
@@ -454,12 +455,25 @@ export default function App() {
     setIsRefreshing(false);
   };
 
+  // ── Upload progress state ───────────────────────────────────────────────────
+  const [uploadProgress, setUploadProgress] = useState({ completed: 0, total: 0 });
+
+  // SSE for upload progress
+  useEffect(() => {
+    const eventSource = new EventSource('http://localhost:3002/api/upload-progress');
+    eventSource.onmessage = (e) => {
+      const data = JSON.parse(e.data);
+      setUploadProgress(data);
+    };
+    return () => eventSource.close();
+  }, []);
+
   // ── Upload handlers ──────────────────────────────────────────────────────────
   const handleUploadFiles = useCallback(async (files) => {
     const fileArray = Array.from(files);
     setUploadQueue(prev => [...prev, ...fileArray.map(f => ({ file: f, status: 'pending', error: null }))]);
+    setUploadProgress({ completed: 0, total: fileArray.length });
     
-    // Upload all files in one request (parallel on backend)
     try {
       const formData = new FormData();
       for (const file of fileArray) {
@@ -467,7 +481,6 @@ export default function App() {
       }
       formData.append('tags', uploadTags);
       
-      // Mark all as uploading
       setUploadQueue(prev => prev.map(e => ({ ...e, status: 'uploading' })));
       
       const res = await fetch('http://localhost:3002/api/upload', { method: 'POST', body: formData });
@@ -481,14 +494,13 @@ export default function App() {
       const result = await res.json();
       
       if (result.results) {
-        // Update queue with results
         setUploadQueue(prev => prev.map(e => {
           const uploaded = result.results.find(r => r.filename === e.file.name);
           if (uploaded) return { ...e, status: 'done' };
-          const error = result.errors?.[result.results.length + (result.errors?.length || 0) - 1];
-          return { ...e, status: 'error', error: error || 'Upload failed' };
+          return { ...e, status: 'error', error: 'Upload failed' };
         }));
       }
+      setUploadProgress({ completed: result.total, total: result.total });
     } catch(e) {
       setUploadQueue(prev => prev.map(en => ({ ...en, status: 'error', error: e.message })));
     }
@@ -510,8 +522,20 @@ export default function App() {
   return (
     <div className="min-h-screen bg-vault-bg text-vault-text flex selection:bg-vault-accent/30 font-sans">
 
-      {/* ── Sidebar ─────────────────────────────────────────────────────────── */}
-      <aside className="w-64 border-r border-vault-border bg-[#101014] p-6 hidden md:flex flex-col gap-6 h-screen sticky top-0 overflow-y-auto">
+      {/* Mobile menu button */}
+      <button onClick={() => setSidebarOpen(true)} className="md:hidden fixed top-4 left-4 z-50 p-2 bg-vault-surface border border-vault-border rounded-lg">
+        <Filter className="w-5 h-5" />
+      </button>
+
+      {/* ── Sidebar / Drawer ────────────────────────────────────────────────── */}
+      <aside className={`
+        fixed md:relative z-50 w-64 h-full border-r border-vault-border bg-[#101014] p-6 flex flex-col gap-6 overflow-y-auto transition-transform duration-300
+        ${sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
+      `}>
+        {/* Mobile close button */}
+        <button onClick={() => setSidebarOpen(false)} className="md:hidden absolute top-4 right-4 p-2 hover:bg-vault-surface rounded-lg">
+          <X className="w-5 h-5" />
+        </button>
         {/* Logo */}
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-vault-accent to-[#ec4899] flex items-center justify-center shadow-[0_0_20px_rgba(139,92,246,0.3)]">
@@ -531,13 +555,13 @@ export default function App() {
           <h2 className="text-xs font-bold text-vault-text-muted uppercase tracking-widest mb-2">Storage Tier</h2>
           <div className="flex flex-col gap-1">
             {[
-              { id: 'ALL',     label: 'Everything',          icon: <Hash className="w-4 h-4"/> },
-              { id: 'ARCHIVE', label: 'Archive (Telegram)',   icon: <HardDrive className="w-4 h-4 text-[#0088cc]"/> },
-              { id: 'EXPIRED', label: 'Expired Links',        icon: <AlertTriangle className="w-4 h-4 text-red-500"/> },
-              { id: 'TRASH',   label: 'Recently Deleted',     icon: <Trash2 className="w-4 h-4 text-zinc-500"/> },
+              { id: 'ALL',     label: 'Everything',          icon: <Hash className="w-5 h-5"/> },
+              { id: 'ARCHIVE', label: 'Archive (Telegram)',   icon: <HardDrive className="w-5 h-5 text-[#0088cc]"/> },
+              { id: 'EXPIRED', label: 'Expired Links',        icon: <AlertTriangle className="w-5 h-5 text-red-500"/> },
+              { id: 'TRASH',   label: 'Recently Deleted',     icon: <Trash2 className="w-5 h-5 text-zinc-500"/> },
             ].map(t => (
-              <button key={t.id} onClick={() => setActiveTier(t.id)}
-                className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeTier === t.id ? 'bg-vault-surface text-white' : 'text-vault-text-muted hover:text-white hover:bg-vault-surface/50'}`}>
+              <button key={t.id} onClick={() => { setActiveTier(t.id); setSidebarOpen(false); }}
+                className={`flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-colors min-h-[48px] ${activeTier === t.id ? 'bg-vault-surface text-white' : 'text-vault-text-muted hover:text-white hover:bg-vault-surface/50'}`}>
                 {t.icon}{t.label}
               </button>
             ))}
@@ -555,9 +579,9 @@ export default function App() {
               { id: 'AUDIO',label:'Audio',     Icon: Music  },
               { id: 'DOC', label: 'Documents', Icon: FileText },
             ].map(({ id, label, Icon }) => (
-              <button key={id} onClick={() => setActiveType(id)}
-                className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeType === id ? 'bg-vault-surface text-white' : 'text-vault-text-muted hover:text-white hover:bg-vault-surface/50'}`}>
-                <Icon className="w-4 h-4 opacity-70" />{label}
+              <button key={id} onClick={() => { setActiveType(id); setSidebarOpen(false); }}
+                className={`flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-colors min-h-[48px] ${activeType === id ? 'bg-vault-surface text-white' : 'text-vault-text-muted hover:text-white hover:bg-vault-surface/50'}`}>
+                <Icon className="w-5 h-5 opacity-70" />{label}
               </button>
             ))}
           </div>
@@ -570,13 +594,13 @@ export default function App() {
             <div className="flex flex-wrap gap-1.5">
               {activeTag && (
                 <button onClick={() => setActiveTag(null)}
-                  className="text-[10px] px-2 py-0.5 rounded-full bg-vault-accent text-white font-bold flex items-center gap-1">
-                  <X className="w-2.5 h-2.5"/> Clear
+                  className="text-xs px-3 py-2 rounded-full bg-vault-accent text-white font-bold flex items-center gap-1 min-h-[40px]">
+                  <X className="w-3.5 h-3.5"/> Clear
                 </button>
               )}
               {tagCloud.map(([tag, count]) => (
-                <button key={tag} onClick={() => setActiveTag(activeTag === tag ? null : tag)}
-                  className={`text-[10px] px-2 py-0.5 rounded-full font-semibold transition-colors ${activeTag === tag ? 'bg-vault-accent text-white' : 'bg-vault-border text-vault-text-muted hover:bg-vault-accent/20 hover:text-white'}`}>
+                <button key={tag} onClick={() => { setActiveTag(activeTag === tag ? null : tag); setSidebarOpen(false); }}
+                  className={`text-xs px-3 py-2 rounded-full font-semibold transition-colors min-h-[40px] ${activeTag === tag ? 'bg-vault-accent text-white' : 'bg-vault-border text-vault-text-muted hover:bg-vault-accent/20 hover:text-white'}`}>
                   #{tag} <span className="opacity-60">{count}</span>
                 </button>
               ))}
@@ -593,25 +617,30 @@ export default function App() {
             </button>
           </div>
           <div className="flex flex-col gap-1">
-            <button onClick={() => setActiveAlbum(null)}
-              className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${!activeAlbum ? 'bg-vault-surface text-white' : 'text-vault-text-muted hover:text-white hover:bg-vault-surface/50'}`}>
-              <Folder className="w-4 h-4" /> All Files
+            <button onClick={() => { setActiveAlbum(null); setSidebarOpen(false); }}
+              className={`flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-colors min-h-[48px] ${!activeAlbum ? 'bg-vault-surface text-white' : 'text-vault-text-muted hover:text-white hover:bg-vault-surface/50'}`}>
+              <Folder className="w-5 h-5" /> All Files
             </button>
             {albums.map(album => (
               <div key={album.id} className="group flex items-center gap-1">
-                <button onClick={() => setActiveAlbum(album)}
-                  className={`flex-1 flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeAlbum?.id === album.id ? 'bg-vault-surface text-white' : 'text-vault-text-muted hover:text-white hover:bg-vault-surface/50'}`}>
-                  <Folder className="w-4 h-4 text-vault-accent" />
+                <button onClick={() => { setActiveAlbum(album); setSidebarOpen(false); }}
+                  className={`flex-1 flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-colors min-h-[48px] ${activeAlbum?.id === album.id ? 'bg-vault-surface text-white' : 'text-vault-text-muted hover:text-white hover:bg-vault-surface/50'}`}>
+                  <Folder className="w-5 h-5 text-vault-accent" />
                   <span className="truncate">{album.name}</span>
                 </button>
-                <button onClick={() => handleDeleteAlbum(album.id)} className="p-1.5 opacity-0 group-hover:opacity-100 hover:bg-red-500/20 rounded text-vault-text-muted hover:text-red-400 transition-all">
-                  <Trash className="w-3 h-3" />
+                <button onClick={() => handleDeleteAlbum(album.id)} className="p-2 opacity-0 group-hover:opacity-100 hover:bg-red-500/20 rounded text-vault-text-muted hover:text-red-400 transition-all min-w-[40px] min-h-[40px] flex items-center justify-center">
+                  <Trash className="w-4 h-4" />
                 </button>
               </div>
             ))}
           </div>
         </div>
       </aside>
+
+      {/* Mobile sidebar overlay */}
+      {sidebarOpen && (
+        <div className="fixed inset-0 bg-black/50 z-40 md:hidden" onClick={() => setSidebarOpen(false)} />
+      )}
 
       {/* ── Main Content ─────────────────────────────────────────────────────── */}
       <main className="flex-1 p-6 lg:p-10 flex flex-col min-h-screen w-full relative"
@@ -626,9 +655,9 @@ export default function App() {
         )}
 
         {/* Header */}
-        <header className="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center mb-6">
+        <header className="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center mb-6 pt-12 md:pt-0">
           <div>
-            <h2 className="text-3xl font-bold tracking-tight">Your Media</h2>
+            <h2 className="text-2xl md:text-3xl font-bold tracking-tight">Your Media</h2>
             <p className="text-vault-text-muted text-sm mt-1">Manage your files in the Telegram Archive</p>
           </div>
           <div className="flex items-center gap-3 w-full md:w-auto">
@@ -639,8 +668,8 @@ export default function App() {
                 className="w-full bg-vault-surface border border-vault-border rounded-xl pl-10 pr-4 py-2.5 text-sm outline-none focus:border-vault-accent/50 focus:ring-1 focus:ring-vault-accent/50 transition-all text-white placeholder:text-vault-text-muted" />
             </div>
             <button onClick={() => { setShowUpload(true); setUploadQueue([]); setUploadTags(''); }}
-              className="flex items-center gap-2 px-4 py-2.5 bg-vault-accent hover:brightness-110 text-white rounded-xl text-sm font-bold transition-all shadow-lg shadow-vault-accent/20 shrink-0">
-              <Plus className="w-4 h-4" /> Upload
+              className="flex items-center gap-2 px-5 py-3 bg-vault-accent hover:brightness-110 text-white rounded-xl text-sm font-bold transition-all shadow-lg shadow-vault-accent/20 shrink-0 min-h-[48px]">
+              <Plus className="w-5 h-5" /> Upload
             </button>
           </div>
         </header>
@@ -715,10 +744,22 @@ export default function App() {
                         }`}>{entry.status === 'error' ? (entry.error?.slice(0, 25) || 'Error') : entry.status}</span>
                       </div>
                     ))}
-                    {uploadQueue.some(e => e.status === 'uploading') && (
-                      <p className="text-xs text-vault-text-muted text-center pt-2">
-                        Uploading {uploadQueue.filter(e => e.status === 'uploading').length} files in parallel...
-                      </p>
+                    {uploadProgress.total > 0 && (
+                      <div className="pt-2">
+                        <div className="flex justify-between text-xs text-vault-text-muted mb-1">
+                          <span>Uploading...</span>
+                          <span>{Math.round((uploadProgress.completed / uploadProgress.total) * 100)}%</span>
+                        </div>
+                        <div className="w-full h-2 bg-[#3f3f46] rounded-full overflow-hidden">
+                          <div 
+                            className="h-full bg-vault-accent transition-all duration-300" 
+                            style={{ width: `${(uploadProgress.completed / uploadProgress.total) * 100}%` }} 
+                          />
+                        </div>
+                        <p className="text-xs text-vault-text-muted text-center pt-1">
+                          {uploadProgress.completed} / {uploadProgress.total} files
+                        </p>
+                      </div>
                     )}
                   </div>
                 )}
@@ -814,9 +855,15 @@ export default function App() {
                 {isSelectionMode ? 'Cancel Selection' : 'Select Multiple'}
               </button>
               {isSelectionMode && selectedIds.size > 0 && (
-                <button onClick={handleSelectAll} className="text-xs font-bold hover:text-white transition-colors text-vault-accent uppercase px-3 py-1 bg-vault-accent/10 rounded-lg">
-                  {selectedIds.size === filteredMedia.length ? 'Deselect All' : 'Select All'}
-                </button>
+                <>
+                  <button onClick={handleSelectAll} className="text-xs font-bold hover:text-white transition-colors text-vault-accent uppercase px-3 py-1 bg-vault-accent/10 rounded-lg">
+                    {selectedIds.size === (activeAlbum ? albumMedia : filteredMedia).length ? 'Deselect All' : 'Select All'}
+                  </button>
+                  <button onClick={() => setSelectedIds(new Set((activeAlbum ? albumMedia : filteredMedia).map(m => m.id)))} 
+                    className="text-xs font-bold hover:text-white transition-colors text-vault-text-muted uppercase px-3 py-1 hover:bg-vault-surface rounded-lg">
+                    Select All in View
+                  </button>
+                </>
               )}
             </div>
           )}
@@ -830,23 +877,23 @@ export default function App() {
               {activeTier === 'TRASH' ? (
                 <>
                   <button onClick={() => handleBatchAction('restore')}
-                    className="flex items-center gap-2 px-4 py-2 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 rounded-lg text-sm font-bold transition-colors">
-                    <RotateCcw className="w-4 h-4" /> Restore All
+                    className="flex items-center gap-2 px-5 py-3 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 rounded-lg text-sm font-bold transition-colors min-h-[48px]">
+                    <RotateCcw className="w-5 h-5" /> Restore All
                   </button>
                   <button onClick={() => handleBatchAction('hard-delete')}
-                    className="flex items-center gap-2 px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg text-sm font-bold transition-colors">
-                    <Trash2 className="w-4 h-4" /> Hard Delete All
+                    className="flex items-center gap-2 px-5 py-3 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg text-sm font-bold transition-colors min-h-[48px]">
+                    <Trash2 className="w-5 h-5" /> Hard Delete All
                   </button>
                 </>
               ) : (
                 <>
                   <button onClick={() => setShowAddToAlbum(true)}
-                    className="flex items-center gap-2 px-4 py-2 bg-vault-accent/20 hover:bg-vault-accent/30 text-vault-accent rounded-lg text-sm font-bold transition-colors">
-                    <FolderPlus className="w-4 h-4" /> Add to Album
+                    className="flex items-center gap-2 px-5 py-3 bg-vault-accent/20 hover:bg-vault-accent/30 text-vault-accent rounded-lg text-sm font-bold transition-colors min-h-[48px]">
+                    <FolderPlus className="w-5 h-5" /> Add to Album
                   </button>
                   <button onClick={() => handleBatchAction('delete')}
-                    className="flex items-center gap-2 px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg text-sm font-bold transition-colors">
-                    <Trash2 className="w-4 h-4" /> Move to Trash
+                    className="flex items-center gap-2 px-5 py-3 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg text-sm font-bold transition-colors min-h-[48px]">
+                    <Trash2 className="w-5 h-5" /> Move to Trash
                   </button>
                 </>
               )}
