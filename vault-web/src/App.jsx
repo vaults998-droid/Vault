@@ -2,7 +2,8 @@ import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import {
   Search, Image, Video, FileText, Music, Hash, Download, Link as LinkIcon,
   X, Filter, HardDrive, RefreshCw, CloudRain, AlertTriangle, Trash2,
-  UploadCloud, Plus, CheckCircle, Edit3, Save, BarChart2, ShieldCheck, RotateCcw
+  UploadCloud, Plus, CheckCircle, Edit3, Save, BarChart2, ShieldCheck, RotateCcw,
+  Folder, FolderPlus, Trash
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 
@@ -127,6 +128,107 @@ export default function App() {
     activeItems.forEach(m => { if (byType[m.type] !== undefined) byType[m.type]++; else byType.DOC++; });
     return { total, archive, expired, trash, byType };
   }, [mediaItems]);
+
+  // ── Albums state ────────────────────────────────────────────────────────────
+  const [albums, setAlbums] = useState([]);
+  const [activeAlbum, setActiveAlbum] = useState(null);
+  const [showAlbumModal, setShowAlbumModal] = useState(false);
+  const [newAlbumName, setNewAlbumName] = useState('');
+  const [newAlbumDesc, setNewAlbumDesc] = useState('');
+  const [albumMedia, setAlbumMedia] = useState([]);
+  const [showAddToAlbum, setShowAddToAlbum] = useState(false);
+
+  // Fetch albums
+  useEffect(() => {
+    async function fetchAlbums() {
+      try {
+        const res = await fetch('http://localhost:3002/api/albums');
+        const data = await res.json();
+        if (data.success) setAlbums(data.albums || []);
+      } catch(e) { console.error('Fetch albums error:', e); }
+    }
+    fetchAlbums();
+  }, []);
+
+  // Fetch media in active album
+  useEffect(() => {
+    async function fetchAlbumMedia() {
+      if (!activeAlbum) {
+        setAlbumMedia([]);
+        return;
+      }
+      try {
+        const res = await fetch(`http://localhost:3002/api/albums/${activeAlbum.id}/media`);
+        const data = await res.json();
+        if (data.success) setAlbumMedia(data.media || []);
+      } catch(e) { console.error('Fetch album media error:', e); }
+    }
+    fetchAlbumMedia();
+  }, [activeAlbum]);
+
+  // Create album
+  const handleCreateAlbum = async () => {
+    if (!newAlbumName.trim()) return;
+    try {
+      const res = await fetch('http://localhost:3002/api/albums', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newAlbumName.trim(), description: newAlbumDesc.trim() || null })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setAlbums(prev => [data.album, ...prev]);
+        setShowAlbumModal(false);
+        setNewAlbumName('');
+        setNewAlbumDesc('');
+      }
+    } catch(e) { alert('Error creating album: ' + e.message); }
+  };
+
+  // Delete album
+  const handleDeleteAlbum = async (albumId) => {
+    if (!window.confirm('Delete this album? Media will not be deleted.')) return;
+    try {
+      const res = await fetch(`http://localhost:3002/api/albums/${albumId}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        setAlbums(prev => prev.filter(a => a.id !== albumId));
+        if (activeAlbum?.id === albumId) setActiveAlbum(null);
+      }
+    } catch(e) { alert('Error deleting album: ' + e.message); }
+  };
+
+  // Add selected media to album
+  const handleAddToAlbum = async (albumId) => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    try {
+      const res = await fetch(`http://localhost:3002/api/albums/${albumId}/media`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ media_ids: ids })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setShowAddToAlbum(false);
+        setSelectedIds(new Set());
+        setIsSelectionMode(false);
+        alert(`Added ${ids.length} item(s) to album`);
+      }
+    } catch(e) { alert('Error adding to album: ' + e.message); }
+  };
+
+  // Remove media from album
+  const handleRemoveFromAlbum = async (mediaId) => {
+    if (!activeAlbum) return;
+    try {
+      const res = await fetch(`http://localhost:3002/api/albums/${activeAlbum.id}/media/${mediaId}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        setAlbumMedia(prev => prev.filter(m => m.id !== mediaId));
+      }
+    } catch(e) { alert('Error removing from album: ' + e.message); }
+  };
 
   // ── Tag Cloud ────────────────────────────────────────────────────────────────
   const tagCloud = useMemo(() => {
@@ -356,26 +458,39 @@ export default function App() {
   const handleUploadFiles = useCallback(async (files) => {
     const fileArray = Array.from(files);
     setUploadQueue(prev => [...prev, ...fileArray.map(f => ({ file: f, status: 'pending', error: null }))]);
-    for (let i = 0; i < fileArray.length; i++) {
-      const file = fileArray[i];
-      setUploadQueue(prev => prev.map(e => e.file === file ? { ...e, status: 'uploading' } : e));
-      try {
-        const formData = new FormData();
-        formData.append('file', file);
-        formData.append('tags', uploadTags);
-        const res = await fetch('http://localhost:3002/api/upload', { method: 'POST', body: formData });
-
-        // FIX #6: Guard against non-JSON error responses (e.g. 413, 500 HTML error pages)
-        const contentType = res.headers.get('content-type') || '';
-        if (!contentType.includes('application/json')) {
-          const text = await res.text();
-          throw new Error(`Server error (${res.status}): ${text.slice(0, 100)}`);
-        }
-        const result = await res.json();
-        setUploadQueue(prev => prev.map(e => e.file === file ? { ...e, status: result.success ? 'done' : 'error', error: result.error || null } : e));
-      } catch(e) {
-        setUploadQueue(prev => prev.map(en => en.file === file ? { ...en, status: 'error', error: e.message } : en));
+    
+    // Upload all files in one request (parallel on backend)
+    try {
+      const formData = new FormData();
+      for (const file of fileArray) {
+        formData.append('files', file);
       }
+      formData.append('tags', uploadTags);
+      
+      // Mark all as uploading
+      setUploadQueue(prev => prev.map(e => ({ ...e, status: 'uploading' })));
+      
+      const res = await fetch('http://localhost:3002/api/upload', { method: 'POST', body: formData });
+      
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        const text = await res.text();
+        throw new Error(`Server error (${res.status}): ${text.slice(0, 100)}`);
+      }
+      
+      const result = await res.json();
+      
+      if (result.results) {
+        // Update queue with results
+        setUploadQueue(prev => prev.map(e => {
+          const uploaded = result.results.find(r => r.filename === e.file.name);
+          if (uploaded) return { ...e, status: 'done' };
+          const error = result.errors?.[result.results.length + (result.errors?.length || 0) - 1];
+          return { ...e, status: 'error', error: error || 'Upload failed' };
+        }));
+      }
+    } catch(e) {
+      setUploadQueue(prev => prev.map(en => ({ ...en, status: 'error', error: e.message })));
     }
   }, [uploadTags]);
 
@@ -468,6 +583,34 @@ export default function App() {
             </div>
           </div>
         )}
+
+        {/* Albums */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="text-xs font-bold text-vault-text-muted uppercase tracking-widest">Albums</h2>
+            <button onClick={() => setShowAlbumModal(true)} className="p-1 hover:bg-vault-surface rounded transition-colors text-vault-text-muted hover:text-vault-accent">
+              <FolderPlus className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="flex flex-col gap-1">
+            <button onClick={() => setActiveAlbum(null)}
+              className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${!activeAlbum ? 'bg-vault-surface text-white' : 'text-vault-text-muted hover:text-white hover:bg-vault-surface/50'}`}>
+              <Folder className="w-4 h-4" /> All Files
+            </button>
+            {albums.map(album => (
+              <div key={album.id} className="group flex items-center gap-1">
+                <button onClick={() => setActiveAlbum(album)}
+                  className={`flex-1 flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeAlbum?.id === album.id ? 'bg-vault-surface text-white' : 'text-vault-text-muted hover:text-white hover:bg-vault-surface/50'}`}>
+                  <Folder className="w-4 h-4 text-vault-accent" />
+                  <span className="truncate">{album.name}</span>
+                </button>
+                <button onClick={() => handleDeleteAlbum(album.id)} className="p-1.5 opacity-0 group-hover:opacity-100 hover:bg-red-500/20 rounded text-vault-text-muted hover:text-red-400 transition-all">
+                  <Trash className="w-3 h-3" />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
       </aside>
 
       {/* ── Main Content ─────────────────────────────────────────────────────── */}
@@ -572,7 +715,86 @@ export default function App() {
                         }`}>{entry.status === 'error' ? (entry.error?.slice(0, 25) || 'Error') : entry.status}</span>
                       </div>
                     ))}
+                    {uploadQueue.some(e => e.status === 'uploading') && (
+                      <p className="text-xs text-vault-text-muted text-center pt-2">
+                        Uploading {uploadQueue.filter(e => e.status === 'uploading').length} files in parallel...
+                      </p>
+                    )}
                   </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Create Album Modal ──────────────────────────────────────────────── */}
+        {showAlbumModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={() => setShowAlbumModal(false)} />
+            <div className="relative bg-[#18181b] border border-[#27272a] rounded-2xl w-full max-w-md shadow-2xl overflow-hidden z-10">
+              <div className="flex items-center justify-between p-5 border-b border-[#27272a]">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-vault-accent/20 rounded-lg"><FolderPlus className="w-5 h-5 text-vault-accent" /></div>
+                  <div>
+                    <h3 className="font-bold text-lg leading-none">Create Album</h3>
+                    <p className="text-xs text-vault-text-muted mt-0.5">Group related files together</p>
+                  </div>
+                </div>
+                <button onClick={() => setShowAlbumModal(false)} className="p-2 hover:bg-[#27272a] rounded-xl transition-colors text-vault-text-muted hover:text-white">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="p-5 flex flex-col gap-4">
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-xs font-bold text-vault-text-muted uppercase tracking-widest">Album Name</label>
+                  <input type="text" placeholder="e.g. Vacation 2024" value={newAlbumName} onChange={e => setNewAlbumName(e.target.value)}
+                    className="w-full bg-[#27272a] border border-[#3f3f46] rounded-lg px-3 py-2 text-sm outline-none focus:border-vault-accent/50 text-white placeholder:text-vault-text-muted" />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-xs font-bold text-vault-text-muted uppercase tracking-widest">Description <span className="font-normal normal-case">(optional)</span></label>
+                  <textarea placeholder="What's this album about?" value={newAlbumDesc} onChange={e => setNewAlbumDesc(e.target.value)} rows={2}
+                    className="w-full bg-[#27272a] border border-[#3f3f46] rounded-lg px-3 py-2 text-sm outline-none focus:border-vault-accent/50 text-white placeholder:text-vault-text-muted resize-none" />
+                </div>
+                <button onClick={handleCreateAlbum} disabled={!newAlbumName.trim()}
+                  className="w-full py-2.5 bg-vault-accent hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-sm font-bold transition-all">
+                  Create Album
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Add to Album Modal ──────────────────────────────────────────────── */}
+        {showAddToAlbum && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={() => setShowAddToAlbum(false)} />
+            <div className="relative bg-[#18181b] border border-[#27272a] rounded-2xl w-full max-w-md shadow-2xl overflow-hidden z-10">
+              <div className="flex items-center justify-between p-5 border-b border-[#27272a]">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-vault-accent/20 rounded-lg"><FolderPlus className="w-5 h-5 text-vault-accent" /></div>
+                  <div>
+                    <h3 className="font-bold text-lg leading-none">Add to Album</h3>
+                    <p className="text-xs text-vault-text-muted mt-0.5">{selectedIds.size} item{selectedIds.size > 1 ? 's' : ''} selected</p>
+                  </div>
+                </div>
+                <button onClick={() => setShowAddToAlbum(false)} className="p-2 hover:bg-[#27272a] rounded-xl transition-colors text-vault-text-muted hover:text-white">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="p-5 flex flex-col gap-2 max-h-80 overflow-y-auto">
+                {albums.length === 0 ? (
+                  <p className="text-sm text-vault-text-muted text-center py-4">No albums yet. Create one first!</p>
+                ) : (
+                  albums.map(album => (
+                    <button key={album.id} onClick={() => handleAddToAlbum(album.id)}
+                      className="flex items-center gap-3 px-4 py-3 rounded-lg bg-[#27272a] hover:bg-vault-accent/20 text-left transition-colors group">
+                      <Folder className="w-5 h-5 text-vault-accent" />
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium text-white truncate">{album.name}</p>
+                        {album.description && <p className="text-xs text-vault-text-muted truncate">{album.description}</p>}
+                      </div>
+                    </button>
+                  ))
                 )}
               </div>
             </div>
@@ -581,7 +803,10 @@ export default function App() {
 
         {/* ── Media Grid ────────────────────────────────────────────────────── */}
         <div className="flex items-center justify-between mb-4">
-          <span className="text-xs font-bold text-vault-text-muted uppercase tracking-widest">{filteredMedia.length} results{isSelectionMode && selectedIds.size > 0 && ` • ${selectedIds.size} selected`}</span>
+          <span className="text-xs font-bold text-vault-text-muted uppercase tracking-widest">
+            {activeAlbum ? activeAlbum.name : 'All Files'}: {activeAlbum ? albumMedia.length : filteredMedia.length} items
+            {isSelectionMode && selectedIds.size > 0 && ` • ${selectedIds.size} selected`}
+          </span>
           {filteredMedia.length > 0 && (
             <div className="flex items-center gap-2">
               <button onClick={() => setIsSelectionMode(!isSelectionMode)}
@@ -614,10 +839,16 @@ export default function App() {
                   </button>
                 </>
               ) : (
-                <button onClick={() => handleBatchAction('delete')}
-                  className="flex items-center gap-2 px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg text-sm font-bold transition-colors">
-                  <Trash2 className="w-4 h-4" /> Move to Trash
-                </button>
+                <>
+                  <button onClick={() => setShowAddToAlbum(true)}
+                    className="flex items-center gap-2 px-4 py-2 bg-vault-accent/20 hover:bg-vault-accent/30 text-vault-accent rounded-lg text-sm font-bold transition-colors">
+                    <FolderPlus className="w-4 h-4" /> Add to Album
+                  </button>
+                  <button onClick={() => handleBatchAction('delete')}
+                    className="flex items-center gap-2 px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg text-sm font-bold transition-colors">
+                    <Trash2 className="w-4 h-4" /> Move to Trash
+                  </button>
+                </>
               )}
             </div>
           </div>
@@ -653,9 +884,9 @@ export default function App() {
                 Retry
               </button>
             </div>
-          ) : filteredMedia.length > 0 ? (
+          ) : (activeAlbum ? albumMedia : filteredMedia).length > 0 ? (
             <>
-              {filteredMedia.map(item => (
+              {(activeAlbum ? albumMedia : filteredMedia).map(item => (
                 <MediaCard 
                   key={item.id} 
                   item={item} 
@@ -805,6 +1036,12 @@ export default function App() {
                       <Hash className="w-3 h-3" />{tag}
                     </span>
                   ))}
+                  {activeAlbum && (
+                    <button onClick={() => { handleRemoveFromAlbum(selectedMedia.id); setSelectedMedia(null); }}
+                      className="text-xs px-2.5 py-1 rounded bg-red-500/20 text-red-400 flex items-center gap-1 hover:bg-red-500/30 transition-colors">
+                      <Trash className="w-3 h-3" /> Remove from Album
+                    </button>
+                  )}
                 </div>
 
                 {/* Verify status pill */}

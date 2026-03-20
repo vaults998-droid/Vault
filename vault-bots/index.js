@@ -190,60 +190,103 @@ app.use(cors());
 app.use(express.json());
 
 // ----------------------------------------------------
-// 4. Direct Upload API (Web UI -> Telegram Archive)
+// 4. Direct Upload API (Web UI -> Telegram Archive) - Parallel
 // ----------------------------------------------------
-app.post('/api/upload', upload.single('file'), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: 'No file provided.' });
+const CONCURRENCY_LIMIT = 3;
 
-    const activeTgChatId = process.env.TELEGRAM_ARCHIVE_CHAT_ID || lastTelegramChatId;
-    if (!activeTgChatId || !tgBot) {
-      return res.status(400).json({ error: 'No Telegram archive chat configured. Set TELEGRAM_ARCHIVE_CHAT_ID in .env or send /start to the bot first.' });
+async function uploadToTelegram(buffer, filename, mimetype, tags) {
+  const activeTgChatId = process.env.TELEGRAM_ARCHIVE_CHAT_ID || lastTelegramChatId;
+  if (!activeTgChatId || !tgBot) {
+    throw new Error('No Telegram archive chat configured.');
+  }
+
+  const sizeStr = formatSize(buffer.length);
+  const dateStr = new Date().toISOString().split('T')[0];
+  const type = getFileType(mimetype);
+
+  const msg = await tgBot.telegram.sendDocument(
+    activeTgChatId,
+    { source: buffer, filename },
+    { caption: `[WEB UPLOAD] ${filename}` }
+  );
+
+  const fileId = msg.document?.file_id
+              || msg.video?.file_id
+              || msg.audio?.file_id
+              || msg.photo?.[msg.photo.length - 1]?.file_id
+              || msg.sticker?.file_id;
+
+  const file_unique_id = msg.document?.file_unique_id
+              || msg.video?.file_unique_id
+              || msg.audio?.file_unique_id
+              || msg.photo?.[msg.photo.length - 1]?.file_unique_id
+              || msg.sticker?.file_unique_id;
+
+  if (!fileId) throw new Error('Telegram upload succeeded but could not get file ID.');
+
+  const fileUrl = await tgBot.telegram.getFileLink(fileId);
+
+  const saved = await saveMediaToDb({
+    filename,
+    type,
+    size: sizeStr,
+    date: dateStr,
+    url: fileUrl.href,
+    telegram_file_id: fileId,
+    file_unique_id,
+    tags: ['web-upload', ...tags]
+  });
+
+  if (!saved) throw new Error('File uploaded to Telegram but DB save failed.');
+
+  return { success: true, filename, url: fileUrl.href, telegram_file_id: fileId, type, size: sizeStr, tags: ['web-upload', ...tags] };
+}
+
+async function processWithConcurrency(items, processor, limit) {
+  const results = [];
+  const executing = [];
+
+  for (const item of items) {
+    const promise = processor(item).then(result => {
+      results.push(result);
+    });
+    executing.push(promise);
+
+    if (executing.length >= limit) {
+      await Promise.race(executing);
+      const completed = executing.filter(p => p !== promise);
+      executing.length = 0;
+      executing.push(...completed.filter(p => !p.then));
+    }
+  }
+
+  await Promise.allSettled(executing);
+  return results;
+}
+
+app.post('/api/upload', upload.array('files', 50), async (req, res) => {
+  try {
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: 'No files provided.' });
     }
 
-    const { originalname, buffer, mimetype, size } = req.file;
     const tagsRaw = req.body.tags || '';
-    const tags    = tagsRaw ? tagsRaw.split(',').map(t => t.trim().toLowerCase()).filter(Boolean) : [];
-    const dateStr = new Date().toISOString().split('T')[0];
-    const type    = getFileType(mimetype);
-    const sizeStr = formatSize(size);
+    const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim().toLowerCase()).filter(Boolean) : [];
 
-    const msg = await tgBot.telegram.sendDocument(
-      activeTgChatId,
-      { source: buffer, filename: originalname },
-      { caption: `[WEB UPLOAD] ${originalname}` }
+    const results = await Promise.allSettled(
+      req.files.map(file => uploadToTelegram(file.buffer, file.originalname, file.mimetype, tags))
     );
 
-    const fileId = msg.document?.file_id
-                || msg.video?.file_id
-                || msg.audio?.file_id
-                || msg.photo?.[msg.photo.length - 1]?.file_id
-                || msg.sticker?.file_id;
+    const successful = results.filter(r => r.status === 'fulfilled').map(r => r.value);
+    const failed = results.filter(r => r.status === 'rejected').map(r => r.reason.message);
 
-    const file_unique_id = msg.document?.file_unique_id
-                || msg.video?.file_unique_id
-                || msg.audio?.file_unique_id
-                || msg.photo?.[msg.photo.length - 1]?.file_unique_id
-                || msg.sticker?.file_unique_id;
-
-    if (!fileId) return res.status(500).json({ error: 'Telegram upload succeeded but could not get file ID.' });
-
-    const fileUrl = await tgBot.telegram.getFileLink(fileId);
-
-    const saved = await saveMediaToDb({
-      filename: originalname,
-      type,
-      size: sizeStr,
-      date: dateStr,
-      url: fileUrl.href,
-      telegram_file_id: fileId,
-      file_unique_id,
-      tags: ['web-upload', ...tags]
+    res.json({
+      success: true,
+      completed: successful.length,
+      failed: failed.length,
+      results: successful,
+      errors: failed
     });
-
-    if (!saved) return res.status(500).json({ error: 'File uploaded to Telegram but DB save failed.' });
-
-    res.json({ success: true, filename: originalname, url: fileUrl.href, telegram_file_id: fileId, type, size: sizeStr, tags: ['web-upload', ...tags] });
 
   } catch (e) {
     console.error('Upload failed:', e);
@@ -469,3 +512,145 @@ app.post('/api/verify-links', async (req, res) => {
 });
 
 app.listen(3002, () => console.log('✅ Vault API Server running on port 3002.'));
+
+// ----------------------------------------------------
+// Album APIs
+// ----------------------------------------------------
+
+// Get all albums
+app.get('/api/albums', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('vault_albums')
+      .select('*, vault_media!vault_albums_cover_media_id_fkey(filename, telegram_url, type)')
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json({ success: true, albums: data });
+  } catch(e) {
+    console.error('Get albums failed:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Create album
+app.post('/api/albums', async (req, res) => {
+  try {
+    const { name, description, cover_media_id } = req.body;
+    if (!name) return res.status(400).json({ error: 'name is required' });
+
+    const { data, error } = await supabase
+      .from('vault_albums')
+      .insert([{ name, description, cover_media_id }])
+      .select()
+      .single();
+    if (error) throw error;
+    res.json({ success: true, album: data });
+  } catch(e) {
+    console.error('Create album failed:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Update album
+app.put('/api/albums/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { name, description, cover_media_id } = req.body;
+    const payload = {};
+    if (name !== undefined) payload.name = name;
+    if (description !== undefined) payload.description = description;
+    if (cover_media_id !== undefined) payload.cover_media_id = cover_media_id;
+
+    const { data, error } = await supabase
+      .from('vault_albums')
+      .update(payload)
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) throw error;
+    res.json({ success: true, album: data });
+  } catch(e) {
+    console.error('Update album failed:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Delete album
+app.delete('/api/albums/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { error } = await supabase.from('vault_albums').delete().eq('id', id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch(e) {
+    console.error('Delete album failed:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Get media in album
+app.get('/api/albums/:id/media', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { data, error } = await supabase
+      .from('vault_album_media')
+      .select('*, vault_media(*)')
+      .eq('album_id', id)
+      .order('position', { ascending: true });
+    if (error) throw error;
+    res.json({ success: true, media: data.map(m => m.vault_media) });
+  } catch(e) {
+    console.error('Get album media failed:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Add media to album
+app.post('/api/albums/:id/media', async (req, res) => {
+  try {
+    const albumId = req.params.id;
+    const { media_ids } = req.body;
+    if (!media_ids || !Array.isArray(media_ids)) {
+      return res.status(400).json({ error: 'media_ids array is required' });
+    }
+
+    // Get current max position
+    const { data: existing } = await supabase
+      .from('vault_album_media')
+      .select('position')
+      .eq('album_id', albumId)
+      .order('position', { ascending: false })
+      .limit(1);
+    let pos = existing?.length ? existing[0].position + 1 : 0;
+
+    const inserts = media_ids.map(mediaId => ({
+      album_id: albumId,
+      media_id: mediaId,
+      position: pos++
+    }));
+
+    const { error } = await supabase.from('vault_album_media').insert(inserts);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch(e) {
+    console.error('Add media to album failed:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Remove media from album
+app.delete('/api/albums/:albumId/media/:mediaId', async (req, res) => {
+  try {
+    const { albumId, mediaId } = req.params;
+    const { error } = await supabase
+      .from('vault_album_media')
+      .delete()
+      .eq('album_id', albumId)
+      .eq('media_id', mediaId);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch(e) {
+    console.error('Remove media from album failed:', e);
+    res.status(500).json({ error: e.message });
+  }
+});

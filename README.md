@@ -30,6 +30,12 @@ cd vault-web && npm run dev
 
 # Start the bots (requires .env configuration)
 cd vault-bots && node index.js
+
+# package.json -Add root-level script for running both projects
+npm run dev:web - Start the frontend dev server
+npm run dev:bots - Start the bots
+npm run build:web - Build the frontend
+npm run install:all - Install dependencies for both projects
 ```
 
 ### Environment Variables
