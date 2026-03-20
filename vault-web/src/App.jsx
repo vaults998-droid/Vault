@@ -102,6 +102,11 @@ export default function App() {
   const [isConnected,   setIsConnected]   = useState(false);
   const [isProcessing,  setIsProcessing]  = useState(false);
 
+  // ── Multi-select state ──────────────────────────────────────────────────────
+  const [selectedIds,       setSelectedIds]       = useState(new Set());
+  const [isSelectionMode,  setIsSelectionMode]    = useState(false);
+  const [batchProgress,    setBatchProgress]      = useState(null);
+
   // ── Pagination ──────────────────────────────────────────────────────────────
   const [page,    setPage]    = useState(0);
   const [hasMore, setHasMore] = useState(true);
@@ -144,25 +149,27 @@ export default function App() {
   // ── Supabase Realtime ────────────────────────────────────────────────────────
   useEffect(() => {
     if (!supabase) return;
-    const channel = supabase
-      .channel('vault_realtime')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'vault_media' }, payload => {
-        // FIX #6: Dedup — don't add if the optimistic upload card is already in the grid
-        setMediaItems(prev =>
-          prev.some(m => m.id === payload.new.id) ? prev : [payload.new, ...prev]
-        );
-      })
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'vault_media' }, payload => {
-        setMediaItems(prev => prev.map(m => m.id === payload.new.id ? payload.new : m));
-        setSelectedMedia(prev => prev && prev.id === payload.new.id ? { ...prev, ...payload.new } : prev);
-      })
-      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'vault_media' }, payload => {
-        setMediaItems(prev => prev.filter(m => m.id !== payload.old.id));
-        // Also close the modal if the currently selected file was deleted via another window
-        setSelectedMedia(prev => prev && prev.id === payload.old.id ? null : prev);
-      })
-      .subscribe();
-    return () => supabase.removeChannel(channel);
+    try {
+      const channel = supabase
+        .channel('vault_realtime')
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'vault_media' }, payload => {
+          setMediaItems(prev =>
+            prev.some(m => m.id === payload.new.id) ? prev : [payload.new, ...prev]
+          );
+        })
+        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'vault_media' }, payload => {
+          setMediaItems(prev => prev.map(m => m.id === payload.new.id ? payload.new : m));
+          setSelectedMedia(prev => prev && prev.id === payload.new.id ? { ...prev, ...payload.new } : prev);
+        })
+        .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'vault_media' }, payload => {
+          setMediaItems(prev => prev.filter(m => m.id !== payload.old.id));
+          setSelectedMedia(prev => prev && prev.id === payload.old.id ? null : prev);
+        })
+        .subscribe();
+      return () => { try { supabase.removeChannel(channel); } catch(e) {} };
+    } catch(e) {
+      console.error('Supabase realtime error:', e);
+    }
   }, []);
 
   // ── Intersection Observer (infinite scroll) ──────────────────────────────────
@@ -579,8 +586,8 @@ export default function App() {
                 <div onClick={() => fileInputRef.current?.click()}
                   className="border-2 border-dashed border-[#27272a] hover:border-vault-accent/50 rounded-xl p-10 flex flex-col items-center justify-center gap-3 cursor-pointer transition-colors text-vault-text-muted hover:text-white group">
                   <UploadCloud className="w-12 h-12 opacity-40 group-hover:opacity-80 group-hover:text-vault-accent transition-all" />
-                  <p className="text-sm font-medium">Click to choose files, or drag &amp; drop anywhere</p>
-                  <p className="text-xs opacity-50">Images, Videos, Audio, Documents — up to 100 MB</p>
+                  <p className="text-sm font-medium">Click to choose multiple files, or drag &amp; drop anywhere</p>
+                  <p className="text-xs opacity-50">Images, Videos, Audio, Documents — up to 100 MB each</p>
                 </div>
                 <div className="flex flex-col gap-1.5">
                   <label className="text-xs font-bold text-vault-text-muted uppercase tracking-widest">Tags <span className="font-normal normal-case">(comma-separated, optional)</span></label>
@@ -615,13 +622,60 @@ export default function App() {
 
         {/* ── Media Grid ────────────────────────────────────────────────────── */}
         <div className="flex items-center justify-between mb-4">
-          <span className="text-xs font-bold text-vault-text-muted uppercase tracking-widest">{filteredMedia.length} results</span>
+          <span className="text-xs font-bold text-vault-text-muted uppercase tracking-widest">{filteredMedia.length} results{isSelectionMode && selectedIds.size > 0 && ` • ${selectedIds.size} selected`}</span>
           {filteredMedia.length > 0 && (
-            <button onClick={selectAll} className="text-xs font-bold hover:text-white transition-colors text-vault-accent uppercase px-3 py-1 bg-vault-accent/10 rounded-lg">
-              {selectedIds.size === filteredMedia.length ? 'Deselect All' : 'Select All'}
-            </button>
+            <div className="flex items-center gap-2">
+              <button onClick={() => setIsSelectionMode(!isSelectionMode)}
+                className={`text-xs font-bold hover:text-white transition-colors uppercase px-3 py-1 rounded-lg ${isSelectionMode ? 'bg-vault-accent text-black' : 'text-vault-accent bg-vault-accent/10'}`}>
+                {isSelectionMode ? 'Cancel Selection' : 'Select Multiple'}
+              </button>
+              {isSelectionMode && selectedIds.size > 0 && (
+                <button onClick={handleSelectAll} className="text-xs font-bold hover:text-white transition-colors text-vault-accent uppercase px-3 py-1 bg-vault-accent/10 rounded-lg">
+                  {selectedIds.size === filteredMedia.length ? 'Deselect All' : 'Select All'}
+                </button>
+              )}
+            </div>
           )}
         </div>
+
+        {/* ── Batch Action Bar ──────────────────────────────────────────────── */}
+        {isSelectionMode && selectedIds.size > 0 && (
+          <div className="mb-6 p-4 bg-vault-surface border border-vault-border rounded-xl flex items-center justify-between gap-4 flex-wrap">
+            <span className="text-sm font-medium text-vault-text">{selectedIds.size} item{selectedIds.size > 1 ? 's' : ''} selected</span>
+            <div className="flex items-center gap-2 flex-wrap">
+              {activeTier === 'TRASH' ? (
+                <>
+                  <button onClick={() => handleBatchAction('restore')}
+                    className="flex items-center gap-2 px-4 py-2 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 rounded-lg text-sm font-bold transition-colors">
+                    <RotateCcw className="w-4 h-4" /> Restore All
+                  </button>
+                  <button onClick={() => handleBatchAction('hard-delete')}
+                    className="flex items-center gap-2 px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg text-sm font-bold transition-colors">
+                    <Trash2 className="w-4 h-4" /> Hard Delete All
+                  </button>
+                </>
+              ) : (
+                <button onClick={() => handleBatchAction('delete')}
+                  className="flex items-center gap-2 px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg text-sm font-bold transition-colors">
+                  <Trash2 className="w-4 h-4" /> Move to Trash
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Batch Progress */}
+        {batchProgress && (
+          <div className="mb-4 p-4 bg-vault-surface border border-vault-accent/50 rounded-xl">
+            <div className="flex items-center justify-between mb-2 text-sm">
+              <span className="font-medium text-vault-text capitalize">{batchProgress.action.replace('-', ' ')}...</span>
+              <span className="text-vault-accent">{batchProgress.current} / {batchProgress.total}</span>
+            </div>
+            <div className="w-full h-2 bg-vault-border rounded-full overflow-hidden">
+              <div className="h-full bg-vault-accent transition-all duration-300" style={{ width: `${(batchProgress.current / batchProgress.total) * 100}%` }} />
+            </div>
+          </div>
+        )}
         
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 flex-1 content-start">
           {isLoading && page === 0 ? (
@@ -648,7 +702,7 @@ export default function App() {
                   item={item} 
                   onClick={setSelectedMedia} 
                   isSelected={selectedIds.has(item.id)}
-                  isSelectMode={isSelectMode}
+                  isSelectMode={isSelectionMode}
                   onToggle={toggleSelection}
                 />
               ))}
