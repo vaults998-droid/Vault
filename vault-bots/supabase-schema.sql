@@ -1,6 +1,4 @@
--- Drop existing tables to recreate with new schema
-drop table if exists vault_album_media cascade;
-drop table if exists vault_albums cascade;
+-- Drop the existing table to recreate it with the new schema
 drop table if exists vault_media cascade;
 
 -- Create the table for VAULT media (Telegram Archive only)
